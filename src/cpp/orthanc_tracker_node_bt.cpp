@@ -3,9 +3,15 @@
 #include <behaviortree_cpp/behavior_tree.h>
 #include <behaviortree_cpp/bt_factory.h>
 #include "Turret.hpp"
+// std::clamp and std::this_thread::sleep_for are both used below. Neither was
+// included directly; the build only worked because rclcpp and BehaviorTree.CPP
+// happened to drag <algorithm> and <thread> in transitively. That is exactly
+// the kind of dependency a toolchain bump breaks, so name them explicitly.
+#include <algorithm>
 #include <memory>
 #include <cmath>
 #include <chrono>
+#include <thread>
 
 // Shared state between ROS2 node and BehaviorTree
 struct TrackerState {

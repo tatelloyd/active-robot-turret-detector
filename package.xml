@@ -2,24 +2,53 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>two_towers</name>
-  <version>0.1.0</version>
-  <description>Dual-turret AI tracking system - Orthanc and Barad-dur</description>
+  <version>0.2.0</version>
+  <description>
+    Dual-turret autonomous person tracking for Raspberry Pi 4. A YOLOv8
+    perception node (Python) publishes normalized detections to a
+    BehaviorTree.CPP tracker (C++), which drives pan/tilt servos through the
+    pigpio daemon. Tower identity comes from the launch namespace, so one
+    build serves any number of towers.
+  </description>
+
   <maintainer email="tatewlloyd@gmail.com">Tate Lloyd</maintainer>
+  <author email="tatewlloyd@gmail.com">Tate Lloyd</author>
   <license>MIT</license>
 
+  <url type="repository">https://github.com/tatelloyd/two-towers</url>
+  <url type="bugtracker">https://github.com/tatelloyd/two-towers/issues</url>
+
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <buildtool_depend>ament_cmake_python</buildtool_depend>
-  
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
   <depend>rclcpp</depend>
-  <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>behaviortree_cpp</depend>
 
-  <build_depend>rosidl_default_generators</build_depend>
+  <!--
+    rclpy is runtime-only. Nothing in this package compiles against it; the
+    detector is installed as a script and imports it at execution time.
+  -->
+  <exec_depend>rclpy</exec_depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+
+  <!--
+    Deliberately NOT listed here: ultralytics, torch, opencv, flask, and
+    pigpio.
+
+    The first four have no rosdep key that resolves to a usable arm64 build,
+    so they come from requirements.txt into the virtualenv. Listing an apt
+    python3-opencv alongside a pip opencv-python would give the detector two
+    installs of the same library and no rule for which one wins.
+
+    pigpio is a system daemon plus a bare .so with no CMake config package.
+    scripts/bootstrap_pi.sh installs it. See that script for the full
+    provisioning sequence.
+  -->
+
   <member_of_group>rosidl_interface_packages</member_of_group>
 
   <export>
