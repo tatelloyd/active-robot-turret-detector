@@ -1,0 +1,74 @@
+[Unit]
+# Templated on purpose. The instance name IS the tower id, so one unit file
+# serves every tower:
+#
+#     systemctl enable --now two-towers@tower_a
+#     systemctl enable --now two-towers@tower_b
+#
+# This mirrors how the launch files work -- identity comes from the namespace,
+# not from anything compiled into a binary or duplicated into a second file.
+Description=Two Towers tracking tower (%i)
+Documentation=https://github.com/tatelloyd/two-towers
+
+# Ordering against pigpiod is a hard requirement, not a nicety: Turret's
+# constructor calls pigpio_start() and throws std::runtime_error if the daemon
+# is not accepting connections, which takes the whole node down. Requires=
+# rather than Wants= so that a pigpiod failure stops the tower instead of
+# leaving it in a crash loop.
+Requires=pigpiod.service
+After=pigpiod.service
+
+# The detector binds the MJPEG stream to 0.0.0.0 and ROS 2 discovery needs a
+# configured interface, so wait for the network to actually be up rather than
+# merely for the stack to exist.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=__TOWER_USER__
+Group=__TOWER_GROUP__
+
+# Base configuration for every tower on this host, then an optional per-tower
+# override. The '-' prefix makes the second file optional: create
+# /etc/two-towers/tower_b.env only if tower B needs to differ.
+EnvironmentFile=/etc/two-towers/tower.env
+EnvironmentFile=-/etc/two-towers/%i.env
+
+# Set after the EnvironmentFiles so it always wins. The tower's identity comes
+# from the unit instance you started, never from a file somebody edited and
+# forgot about.
+Environment=TOWER_ID=%i
+
+# systemd creates /var/lib/two-towers and chowns it to User= above.
+#
+# This exists because ultralytics needs somewhere writable at runtime: it keeps
+# a settings.json in its config dir and downloads yolov8n.pt (~6 MB) on first
+# use. Under a service there is no interactive HOME, so without these it tries
+# paths it cannot write and the detector dies during YOLO() construction.
+StateDirectory=two-towers
+WorkingDirectory=/var/lib/two-towers
+Environment=HOME=/var/lib/two-towers
+Environment=YOLO_CONFIG_DIR=/var/lib/two-towers/ultralytics
+Environment=MPLCONFIGDIR=/var/lib/two-towers/matplotlib
+
+# A wrapper rather than an inline `bash -c`: sourcing three setup scripts and
+# putting the venv on PATH is real logic, and logic you can run by hand is
+# logic you can debug. See scripts/run_tower.sh.
+ExecStart=__WORKSPACE__/scripts/run_tower.sh
+
+Restart=on-failure
+RestartSec=5
+
+# The tracker node's destructor centers the turret. SIGINT is what its ROS
+# shutdown path expects, so send that rather than SIGTERM and allow time for
+# the servos to travel before systemd escalates to SIGKILL.
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=two-towers-%i
+
+[Install]
+WantedBy=multi-user.target
