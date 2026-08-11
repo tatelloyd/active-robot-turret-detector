@@ -132,8 +132,11 @@ Servo commands become no-ops; everything above the GPIO boundary is real.
 git clone https://github.com/tatelloyd/two-towers.git
 cd two-towers
 
-# Python environment
-python3 -m venv venv
+# Python environment.
+# --system-site-packages is mandatory: rclpy is installed by apt into
+# /opt/ros/jazzy and has no PyPI package, so an isolated venv cannot see it
+# and the detector dies on `import rclpy`.
+python3 -m venv --system-site-packages venv
 source venv/bin/activate
 pip install -r requirements.txt
 
