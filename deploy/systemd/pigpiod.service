@@ -1,0 +1,26 @@
+[Unit]
+# Ubuntu has no pigpiod package, so pigpio is built from source by
+# scripts/bootstrap_pi.sh and this unit is installed alongside it. On
+# Raspberry Pi OS the distro ships its own equivalent and this file is
+# unnecessary.
+Description=pigpio daemon
+Documentation=https://abyz.me.uk/rpi/pigpio/pigpiod.html
+After=network.target
+
+[Service]
+Type=forking
+
+# /usr/local/bin, not /usr/bin: upstream's own util/pigpiod.service assumes a
+# distro package layout, but `make install` from source lands here.
+#
+# -l disables the remote socket interface, so the daemon accepts connections
+# only from localhost. Both nodes run on the same Pi as the daemon, so nothing
+# needs the network-facing socket, and pigpiod's protocol is unauthenticated
+# and speaks directly to GPIO -- exposing it to the LAN would let anything on
+# the network drive the servos.
+ExecStart=/usr/local/bin/pigpiod -l
+
+ExecStop=/bin/systemctl kill -s SIGKILL pigpiod
+
+[Install]
+WantedBy=multi-user.target
