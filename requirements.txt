@@ -45,5 +45,28 @@
 numpy>=1.26,<2
 
 ultralytics>=8.3,<9
-opencv-python>=4.9,<5
 flask>=3.0,<4
+
+# Deliberately opencv-python and NOT opencv-python-headless, even though the
+# towers are headless servers and nothing here opens a window.
+#
+# ultralytics declares a hard dependency on opencv-python. Installing the
+# headless wheel satisfies `import cv2`, but leaves that dependency unmet, so
+# the next `pip install -r requirements.txt` reinstalls the GUI wheel on top
+# and quietly undoes it. The cost of keeping opencv-python is two system
+# libraries (libgl1, libglib2.0-0t64) that scripts/bootstrap_pi.sh installs;
+# without them `import cv2` fails with "ImportError: libGL.so.1".
+#
+# The version range interacts with the numpy cap above: opencv-python 4.12+
+# requires numpy>=2, so the resolver backtracks to 4.11.0.86, which is the
+# newest build that still supports numpy 1.x. That is intended, not a
+# coincidence -- raising the numpy cap would let opencv pull numpy 2 in
+# through the side door and break the generated message modules.
+opencv-python>=4.9,<5
+
+# colcon-core requires setuptools<80. Nothing here asks for setuptools
+# directly, but pip pulls a much newer one in transitively, and because the
+# venv is --system-site-packages it then shadows the apt setuptools that
+# colcon runs against. The symptom is `colcon build` breaking only after you
+# activate the venv, which is exactly what the README tells you to do.
+setuptools<80

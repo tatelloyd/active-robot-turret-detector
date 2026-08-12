@@ -118,10 +118,11 @@ cd two-towers
 ```
 
 That adds the ROS 2 apt repository, installs Jazzy and BehaviorTree.CPP,
-installs and enables `pigpiod`, builds the virtualenv, installs the Python
-dependencies, verifies that `rclpy`, `cv2`, `flask` and `ultralytics` all
-import, and builds the workspace. It is idempotent — re-running it is safe,
-which is what makes it testable on a second card.
+**builds pigpio from source** and enables the daemon (Ubuntu has no working
+pigpio package — see Troubleshooting), builds the virtualenv, installs the
+Python dependencies, verifies that `rclpy`, `cv2`, `flask` and `ultralytics`
+all import, and builds the workspace. It is idempotent — re-running it is
+safe, which is what makes it testable on a second card.
 
 On a laptop with no Pi attached, stub the GPIO layer instead:
 
@@ -146,13 +147,23 @@ curl -L -o /tmp/ros2-apt-source.deb \
   "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.noble_all.deb"
 sudo apt install -y /tmp/ros2-apt-source.deb
 
+# libgl1 and libglib2.0-0t64 are for opencv-python, which links OpenGL that a
+# Server image does not ship. Note the ABSENCE of pigpio here -- see below.
 sudo apt update && sudo apt install -y \
     ros-jazzy-ros-base ros-jazzy-behaviortree-cpp \
     python3-colcon-common-extensions python3-venv \
-    pigpio libpigpio-dev build-essential cmake git
+    build-essential cmake git libgl1 libglib2.0-0t64
+
+# pigpio must be built from source: Ubuntu 24.04 has no pigpiod package, and
+# its libpigpiod-if-dev ships a header that includes a pigpio.h no noble
+# package provides. `apt install pigpio` is Raspberry Pi OS advice.
+git clone --depth 1 --branch v79 https://github.com/joan2937/pigpio.git /tmp/pigpio
+(cd /tmp/pigpio && make -j"$(nproc)" && sudo make install && sudo ldconfig)
 
 # Hardware PWM needs the daemon. Turret's constructor throws without it.
-sudo systemctl enable --now pigpiod
+# The source build ships no unit file, so install the one in this repo.
+sudo install -m0644 deploy/systemd/pigpiod.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now pigpiod
 
 # --system-site-packages is MANDATORY. rclpy is installed by apt into
 # /opt/ros/jazzy and has no PyPI package, so an isolated venv cannot see it
@@ -432,6 +443,38 @@ ultralytics needs a writable config directory and somewhere to download
 `yolov8n.pt`. The unit points `HOME` and `YOLO_CONFIG_DIR` at
 `/var/lib/two-towers` via `StateDirectory=`; if you wrote your own unit, that
 is what is missing.
+
+### `ImportError: libGL.so.1: cannot open shared object file`
+
+`opencv-python` links OpenGL, which Ubuntu **Server** does not ship:
+
+```bash
+sudo apt install -y libgl1 libglib2.0-0t64
+```
+
+Switching to `opencv-python-headless` looks like the tidier fix and is not:
+ultralytics hard-depends on `opencv-python`, so the next
+`pip install -r requirements.txt` reinstalls the GUI wheel over it.
+
+### `fatal error: pigpio.h: No such file or directory`
+
+Ubuntu 24.04 cannot provide a working pigpio from apt. There is no `pigpiod`
+package on noble at all, and the `libpigpiod-if-dev` that *does* exist ships a
+header including `pigpio.h`, which no noble package provides. Every guide
+saying `apt install pigpio` is written for Raspberry Pi OS.
+
+`scripts/bootstrap_pi.sh` builds pigpio from source for this reason. To do it
+by hand:
+
+```bash
+git clone --depth 1 --branch v79 https://github.com/joan2937/pigpio.git /tmp/pigpio
+cd /tmp/pigpio && make -j4 && sudo make install && sudo ldconfig
+sudo install -m0644 ~/two-towers/deploy/systemd/pigpiod.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now pigpiod
+```
+
+Confirm the daemon is reachable with `systemctl is-active pigpiod && pigs t`
+— that should print `active` and a tick count.
 
 ### Build fails at `find_package(behaviortree_cpp)`
 

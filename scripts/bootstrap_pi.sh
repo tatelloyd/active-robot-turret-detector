@@ -32,6 +32,12 @@ REQUIRED_UBUNTU="24.04"
 # package is versioned independently of ROS itself and rarely moves.
 ROS_APT_SOURCE_FALLBACK="1.2.0"
 
+# pigpio is built from source; see the pigpio section for why apt cannot
+# supply it on Ubuntu. Pinned to a release tag rather than master so two cards
+# provisioned a month apart get the same daemon.
+PIGPIO_VERSION="v79"
+PIGPIO_SRC="/usr/local/src/pigpio"
+
 SIM_GPIO=0
 SKIP_BUILD=0
 SKIP_APT=0
@@ -150,37 +156,90 @@ else
     build-essential
     cmake
     git
-  )
 
-  # pigpio is the one piece that only makes sense on real hardware. With
-  # --sim-gpio the build uses src/cpp/sim/pigpiod_if2.h instead and the
-  # library is never linked, so installing it would be dead weight.
-  if [ "$SIM_GPIO" -eq 0 ]; then
-    PACKAGES+=(pigpio libpigpio-dev)
-  fi
+    # opencv-python links libGL and libglib, which a Server image has no
+    # reason to ship. Without these, `import cv2` dies with
+    # "ImportError: libGL.so.1: cannot open shared object file".
+    #
+    # The tempting alternative -- opencv-python-headless -- does not work
+    # here: ultralytics declares a hard dependency on opencv-python, so pip
+    # reinstalls the GUI wheel over the headless one on the next
+    # `pip install -r requirements.txt` and the fix silently unwinds. Two
+    # small system libraries are cheaper than fighting that every upgrade.
+    libgl1
+    libglib2.0-0t64
+  )
 
   sudo apt-get install -y "${PACKAGES[@]}"
 fi
 
 # ---------------------------------------------------------------------------
-# pigpio daemon
+# pigpio
 # ---------------------------------------------------------------------------
 if [ "$SIM_GPIO" -eq 1 ]; then
-  step "Skipping pigpiod (--sim-gpio)"
+  step "Skipping pigpio (--sim-gpio)"
 else
+  step "Installing pigpio"
+  # Ubuntu 24.04 cannot supply a working pigpio, and this is not a matter of
+  # finding the right package name:
+  #
+  #   - there is no `pigpiod` binary package on noble, on any architecture.
+  #     Debian dropped the daemon; upstream pigpio is unmaintained and does
+  #     not work on the Pi 5's RP1 at all.
+  #   - `libpigpiod-if-dev` does exist, but it is broken: its
+  #     /usr/include/pigpiod_if2.h does `#include <pigpio.h>`, and no noble
+  #     package ships pigpio.h. Compiling against it fails with
+  #     "fatal error: pigpio.h: No such file or directory".
+  #
+  # Every Raspberry Pi guide says `apt install pigpio`, and every one of them
+  # assumes Raspberry Pi OS. On Ubuntu the only route is a source build, which
+  # installs headers, both client libraries and the daemon under /usr/local --
+  # already on the default include and linker search paths.
+  if command -v pigpiod >/dev/null 2>&1 && [ -f /usr/local/include/pigpiod_if2.h ]; then
+    info "pigpio already installed ($(command -v pigpiod))"
+  else
+    info "building pigpio ${PIGPIO_VERSION} from source (a few minutes on a Pi)"
+    sudo rm -rf "$PIGPIO_SRC"
+    sudo git clone --quiet --depth 1 --branch "$PIGPIO_VERSION" \
+      https://github.com/joan2937/pigpio.git "$PIGPIO_SRC"
+    sudo make -C "$PIGPIO_SRC" -j"$(nproc)"
+    # `make install` also runs `python3 setup.py install`, which is deprecated
+    # on 3.12 and emits a wall of setuptools warnings. It still succeeds, and
+    # the C artifacts are installed before that step regardless.
+    sudo make -C "$PIGPIO_SRC" install
+    sudo ldconfig
+  fi
+
+  for f in /usr/local/include/pigpiod_if2.h \
+           /usr/local/lib/libpigpiod_if2.so \
+           /usr/local/bin/pigpiod; do
+    [ -e "$f" ] || die "pigpio install incomplete: ${f} is missing"
+  done
+  info "headers, client library and daemon all present"
+
   step "Enabling the pigpio daemon"
   # Hardware PWM needs the daemon running before the tracker starts. Turret's
   # constructor calls pigpio_start() and throws if it cannot connect.
-  if systemctl list-unit-files 2>/dev/null | grep -q '^pigpiod\.service'; then
-    sudo systemctl enable --now pigpiod
-    if systemctl is-active --quiet pigpiod; then
-      info "pigpiod is running"
-    else
-      warn "pigpiod is enabled but not active; check: systemctl status pigpiod"
-    fi
+  #
+  # A source build installs no unit file, so ship our own.
+  #
+  # `systemctl cat` rather than `systemctl list-unit-files | grep -q`: the
+  # latter is a pipeline, and `grep -q` exits at the first match, which
+  # SIGPIPEs systemctl mid-write. Under `set -o pipefail` the pipeline then
+  # reports 141 and a successful match reads as a failure -- which is exactly
+  # how this script came to insist a running pigpiod did not exist.
+  if ! systemctl cat pigpiod.service >/dev/null 2>&1; then
+    info "installing pigpiod.service"
+    sudo install -m 0644 "${REPO_ROOT}/deploy/systemd/pigpiod.service" \
+      /etc/systemd/system/pigpiod.service
+    sudo systemctl daemon-reload
+  fi
+
+  sudo systemctl enable --now pigpiod
+  if systemctl is-active --quiet pigpiod; then
+    info "pigpiod is running"
   else
-    warn "no pigpiod.service found -- servos will not move"
-    warn "expected from the 'pigpio' package; re-run without --skip-apt"
+    warn "pigpiod is enabled but not active; check: systemctl status pigpiod"
   fi
 fi
 
@@ -263,7 +322,7 @@ Start a tower by hand:
     source ${VENV_DIR}/bin/activate
     ros2 launch two_towers tower.launch.py tower_id:=tower_a
 
-The MJPEG debug stream is then on http://\$(hostname).local:5000
+The MJPEG debug stream is then on http://$(hostname).local:5000
 
 To run it as a service instead of by hand, see scripts/install_systemd.sh.
 EOF
