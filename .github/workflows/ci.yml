@@ -15,16 +15,22 @@ jobs:
   # ==========================================================================
   # Build the ROS2 package and run whatever tests exist.
   #
-  # This runs in the official ROS2 Humble container, which is the same
-  # distribution the Pi runs. It will NOT catch anything that depends on real
-  # hardware timing or real servos. What it does catch is the large class of
-  # breakage that has nothing to do with hardware: malformed .msg files, CMake
-  # mistakes, missing dependencies, C++ that does not compile, and headers that
-  # moved. Historically that is where most robotics repo breakage lives.
+  # This runs in the official ROS 2 Jazzy container on Ubuntu 24.04, which is
+  # the distribution both Pis run. It will NOT catch anything that depends on
+  # real hardware timing or real servos. What it does catch is the large class
+  # of breakage that has nothing to do with hardware: malformed .msg files,
+  # CMake mistakes, missing dependencies, C++ that does not compile, and
+  # headers that moved. Historically that is where most robotics repo breakage
+  # lives.
+  #
+  # The runner is x86_64 and the Pi is arm64. That difference is real but
+  # narrow: it will not catch an arm-only miscompile, and it will not catch a
+  # wheel that has no aarch64 build. It does catch everything above the
+  # instruction set, which is nearly all of it.
   # ==========================================================================
   build:
-    runs-on: ubuntu-latest
-    container: ros:humble-ros-base
+    runs-on: ubuntu-24.04
+    container: ros:jazzy-ros-base
 
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +39,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ros-humble-behaviortree-cpp \
+            ros-jazzy-behaviortree-cpp \
             python3-colcon-common-extensions
 
       # The runner is x86 with no Raspberry Pi and no pigpio daemon, so we build
@@ -43,7 +49,7 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          source /opt/ros/humble/setup.bash
+          source /opt/ros/jazzy/setup.bash
           colcon build \
             --event-handlers console_direct+ \
             --cmake-args -DTWO_TOWERS_SIM_GPIO=ON -DCMAKE_BUILD_TYPE=Release
@@ -51,7 +57,7 @@ jobs:
       - name: Test
         shell: bash
         run: |
-          source /opt/ros/humble/setup.bash
+          source /opt/ros/jazzy/setup.bash
           colcon test --event-handlers console_direct+
           colcon test-result --verbose
 
@@ -62,7 +68,7 @@ jobs:
       - name: Validate launch files
         shell: bash
         run: |
-          source /opt/ros/humble/setup.bash
+          source /opt/ros/jazzy/setup.bash
           source install/setup.bash
           ros2 launch two_towers tower.launch.py --show-args
           ros2 launch two_towers two_towers.launch.py --show-args
@@ -73,16 +79,20 @@ jobs:
   # Deliberately does not import the module: that would pull in torch,
   # ultralytics and OpenCV and turn a 30-second job into a multi-minute one.
   # Syntax errors and lint violations are catchable without paying that cost.
+  #
+  # Python 3.12 to match Ubuntu 24.04, which is what Jazzy targets and what
+  # the Pis are running. Linting against a different interpreter version than
+  # the robot executes is how you get a green pipeline and a broken deploy.
   # ==========================================================================
   lint-python:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       # Pinned deliberately. An unpinned linter means a new ruff release can
       # fail CI on a commit that changed nothing. Bump this on purpose.

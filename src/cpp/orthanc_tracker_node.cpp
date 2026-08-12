@@ -46,6 +46,9 @@
 #include <rclcpp/rclcpp.hpp>
 #include <two_towers/msg/detection_array.hpp>
 #include "Turret.hpp"
+// std::clamp is used throughout the control law; it comes from <algorithm>,
+// which was previously pulled in only by accident through rclcpp's headers.
+#include <algorithm>
 #include <memory>
 #include <cmath>
 
