@@ -29,3 +29,18 @@ ignore = [
 # The headless test scripts are operator tools run by hand on the Pi. They print
 # liberally and are not imported by anything.
 "tests/python/*" = ["T201"]
+
+[lint.isort]
+# `two_towers` is this package's own namespace, but nothing in the source tree
+# looks like it: rosidl generates the Python module from msg/*.msg at build
+# time and it exists only in install/.
+#
+# Left to infer, ruff's isort decides first- vs third-party by looking for a
+# matching directory next to the source. That made the classification depend on
+# a two_towers/ directory that this commit deletes, so the detector's import
+# block was correct before the deletion and I001 after it -- a lint failure in
+# a file the deletion never touched.
+#
+# Declaring it explicitly makes the answer independent of the source layout,
+# which is what it should have been all along.
+known-first-party = ["two_towers"]

@@ -1,35 +1,49 @@
-certifi==2025.10.5
-charset-normalizer==3.4.4
-contourpy==1.3.3
-cycler==0.12.1
-filelock==3.20.0
-Flask==3.0.3
-fonttools==4.60.1
-fsspec==2025.10.0
-idna==3.11
-Jinja2==3.1.6
-kiwisolver==1.4.9
-MarkupSafe==3.0.3
-matplotlib==3.10.7
-mpmath==1.3.0
-networkx==3.5
-numpy==2.2.6
-opencv-python==4.12.0.88
-packaging==25.0
-pillow==12.0.0
-polars-runtime-32==1.35.1
-polars==1.35.1
-psutil==7.1.2
-pyparsing==3.2.5
-python-dateutil==2.9.0.post0
-PyYAML==6.0.3
-requests==2.32.5
-scipy==1.16.3
-six==1.17.0
-sympy==1.14.0
-torch==2.9.0
-torchvision==0.24.0
-typing_extensions==4.15.0
-ultralytics-thop==2.0.18
-ultralytics==8.3.223
-urllib3==2.5.0
+# Python packages the detector needs that do NOT come from apt.
+#
+# This is a list of direct dependencies, not a `pip freeze`. The previous file
+# was freeze output: 35 pinned packages including matplotlib, polars, scipy and
+# Flask's entire transitive tree, almost none of which anything in this repo
+# imports. A freeze also pins the children, so upgrading one real dependency
+# turns into a resolver conflict against a dozen pins nobody chose.
+#
+# What the detector imports, and where each piece comes from:
+#
+#   rclpy, std_msgs, two_towers.msg   apt, via ros-jazzy-*. NOT in this file
+#                                     and not installable from PyPI.
+#   cv2                               opencv-python, below
+#   flask                             below
+#   ultralytics (YOLO)                below; resolves torch and torchvision
+#                                     itself, so neither is pinned here
+#
+# ---------------------------------------------------------------------------
+# Creating the venv
+# ---------------------------------------------------------------------------
+#
+#   python3 -m venv --system-site-packages venv
+#
+# The flag is mandatory, not a convenience. ROS 2 installs its Python packages
+# into /opt/ros/jazzy/lib/python3.12/site-packages and there is no pip package
+# for rclpy. A plain `python3 -m venv venv` produces an environment that cannot
+# see any of it, and the detector dies on `import rclpy` at line 42 before it
+# ever reaches YOLO. scripts/bootstrap_pi.sh creates the venv correctly.
+
+# ---------------------------------------------------------------------------
+# numpy is capped below 2.0 deliberately, and this pin is load-bearing.
+#
+# Ubuntu 24.04 ships numpy 1.26, and every ROS 2 Jazzy Python C extension on
+# the system is compiled against that ABI -- including the rosidl-generated
+# two_towers.msg modules that colcon builds on the Pi itself. Because the venv
+# is created with --system-site-packages, a pip-installed numpy 2.x shadows the
+# apt one for those extensions and they fail at import with
+#
+#   AttributeError: _ARRAY_API not found
+#   A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x
+#
+# which surfaces as the detector failing to import its own message types. Raise
+# this cap only together with the system numpy.
+# ---------------------------------------------------------------------------
+numpy>=1.26,<2
+
+ultralytics>=8.3,<9
+opencv-python>=4.9,<5
+flask>=3.0,<4

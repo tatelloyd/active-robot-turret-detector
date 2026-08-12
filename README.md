@@ -4,10 +4,12 @@
 
 A high-performance autonomous person tracking system featuring YOLOv8 computer vision, behavior tree control architecture, and real-time servo actuation. Built for Raspberry Pi 4 with hardware PWM control.
 
+[![CI](https://github.com/tatelloyd/two-towers/actions/workflows/ci.yml/badge.svg)](https://github.com/tatelloyd/two-towers/actions/workflows/ci.yml)
 [![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi%204-red)]()
+[![OS](https://img.shields.io/badge/Ubuntu-24.04%20LTS%20Server-orange)]()
+[![ROS2](https://img.shields.io/badge/ROS%202-Jazzy-green)]()
 [![C++](https://img.shields.io/badge/C%2B%2B-17-blue)]()
-[![Python](https://img.shields.io/badge/Python-3.9%2B-blue)]()
-[![ROS2](https://img.shields.io/badge/ROS2-Humble-green)]()
+[![Python](https://img.shields.io/badge/Python-3.12-blue)]()
 
 ---
 
@@ -91,64 +93,93 @@ Two Towers demonstrates core principles of autonomous systems engineering:
 | **Pan/Tilt Mount** | [SparkFun ROB-14045](https://www.sparkfun.com/products/14045) | Includes 2x SG90 servos |
 | **USB Webcam** | 320x240 @ 15fps | Any UVC-compatible camera |
 | **Power Supply** | 5V 3A USB-C | Official RPi PSU recommended |
-| **MicroSD Card** | 32GB+ Class 10 | Raspberry Pi OS (Debian 12) |
+| **MicroSD Card** | 32GB+ Class 10 | Ubuntu 24.04 LTS Server, 64-bit (arm64) |
+
+> **Flash the card with Raspberry Pi Imager**, choosing *Ubuntu Server 24.04 LTS
+> (64-bit)* — not Desktop, and not Raspberry Pi OS. Use the gear icon to preset
+> the username, password and SSH before writing; the alternative is Ubuntu's
+> first-boot forced password change, which disconnects you mid-login.
+>
+> ROS 2 Jazzy targets Ubuntu 24.04 specifically. On any other release there are
+> no `ros-jazzy-*` packages to install.
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-
-```bash
-# System dependencies
-sudo apt-get update && sudo apt-get install -y \
-    cmake libpigpio-dev pigpio python3-pip \
-    ros-humble-behaviortree-cpp
-
-# Enable pigpiod daemon (required for hardware PWM)
-sudo systemctl enable pigpiod
-sudo systemctl start pigpiod
-
-# ROS2 Humble (if not installed)
-# Follow: https://docs.ros.org/en/humble/Installation.html
-```
-
-BehaviorTree.CPP is a hard requirement -- the tracker is a behavior tree node
-and there is no fallback. If it is missing, the build fails at `find_package`
-rather than quietly producing a package with no tracker in it.
-
-To build on a machine with no Raspberry Pi attached (a laptop, or CI), skip
-pigpio and stub it instead:
-
-```bash
-colcon build --cmake-args -DTWO_TOWERS_SIM_GPIO=ON
-```
-
-Servo commands become no-ops; everything above the GPIO boundary is real.
-
 ### Installation
+
+On a Pi freshly flashed with Ubuntu 24.04 Server, one script does everything:
 
 ```bash
 git clone https://github.com/tatelloyd/two-towers.git
 cd two-towers
-
-# Python environment
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Build ROS2 package
-colcon build
-source install/setup.bash
+./scripts/bootstrap_pi.sh
 ```
+
+That adds the ROS 2 apt repository, installs Jazzy and BehaviorTree.CPP,
+installs and enables `pigpiod`, builds the virtualenv, installs the Python
+dependencies, verifies that `rclpy`, `cv2`, `flask` and `ultralytics` all
+import, and builds the workspace. It is idempotent — re-running it is safe,
+which is what makes it testable on a second card.
+
+On a laptop with no Pi attached, stub the GPIO layer instead:
+
+```bash
+./scripts/bootstrap_pi.sh --sim-gpio
+```
+
+Servo commands become no-ops; everything above the GPIO boundary is real. This
+is also exactly what CI builds.
+
+<details>
+<summary>What the script does, if you would rather do it by hand</summary>
+
+```bash
+# ROS 2 Jazzy apt repository. Note this uses the ros2-apt-source package --
+# the older ros-archive-keyring.gpg method stopped working when that key
+# expired in mid-2025, and most tutorials online still show it.
+sudo apt install -y software-properties-common curl
+sudo add-apt-repository -y universe
+export ROS_APT_SOURCE_VERSION=1.2.0
+curl -L -o /tmp/ros2-apt-source.deb \
+  "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.noble_all.deb"
+sudo apt install -y /tmp/ros2-apt-source.deb
+
+sudo apt update && sudo apt install -y \
+    ros-jazzy-ros-base ros-jazzy-behaviortree-cpp \
+    python3-colcon-common-extensions python3-venv \
+    pigpio libpigpio-dev build-essential cmake git
+
+# Hardware PWM needs the daemon. Turret's constructor throws without it.
+sudo systemctl enable --now pigpiod
+
+# --system-site-packages is MANDATORY. rclpy is installed by apt into
+# /opt/ros/jazzy and has no PyPI package, so an isolated venv cannot see it
+# and the detector dies on `import rclpy` before it ever loads a model.
+python3 -m venv --system-site-packages venv
+./venv/bin/pip install -r requirements.txt
+
+source /opt/ros/jazzy/setup.bash
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+```
+
+</details>
+
+BehaviorTree.CPP is a hard requirement — the tracker is a behavior tree node
+and there is no fallback. If it is missing, the build fails at `find_package`
+rather than quietly producing a package with no tracker in it. The version
+floor is 4.1, because the tracker calls `Tree::tickOnce()` and its XML declares
+`BTCPP_format="4"`. The Jazzy apt repository currently carries 4.9.
 
 ### Running the System
 
 One tower, one command:
 
 ```bash
-source venv/bin/activate
+source /opt/ros/jazzy/setup.bash
 source install/setup.bash
+source venv/bin/activate
 ros2 launch two_towers tower.launch.py
 ```
 
@@ -179,6 +210,35 @@ The turret will:
 **Video Stream**: Open `http://<raspberry-pi-ip>:5000` in a browser
 
 **Stop**: Press `Ctrl+C` in either terminal (servos auto-center on shutdown)
+
+### Running as a Service
+
+The commands above keep the robot alive only as long as the SSH session is
+open. To have a tower start at boot and stay up:
+
+```bash
+sudo ./scripts/install_systemd.sh
+sudo systemctl enable --now two-towers@tower_a
+journalctl -u two-towers@tower_a -f
+```
+
+The unit is templated on the tower id, so `two-towers@tower_b` is a second
+instance of the same file rather than a second file. Shared configuration lives
+in `/etc/two-towers/tower.env`; per-tower overrides go in
+`/etc/two-towers/<tower_id>.env`, which only needs to contain the keys that
+differ.
+
+`install_systemd.sh` will not overwrite an existing `tower.env` — once it
+exists it belongs to the deployment. Use `--dry-run` to see exactly what would
+be written.
+
+If a tower fails under systemd, run the same thing by hand to see the error
+directly instead of through the journal:
+
+```bash
+TOWER_ID=tower_a TWO_TOWERS_WORKSPACE=$PWD TWO_TOWERS_VENV=$PWD/venv \
+  ./scripts/run_tower.sh
+```
 
 ---
 
@@ -222,11 +282,13 @@ double adjustment = clamp(error * gain, -2.0, 2.0);  // Max 2° per tick
 two-towers/
 ├── src/
 │   ├── cpp/
-│   │   ├── orthanc_tracker_node.cpp  # ROS2 tracker (simple version)
-│   │   ├── bt_nodes.hpp              # Behavior tree nodes
-│   │   ├── Turret.{cpp,hpp}          # Pan/tilt turret controller
-│   │   ├── ServoController.{cpp,hpp} # PWM servo abstraction
-│   │   └── main.cpp                  # Standalone tracker (file IPC)
+│   │   ├── orthanc_tracker_node_bt.cpp  # ROS2 tracker (behavior tree) ← the real one
+│   │   ├── orthanc_tracker_node.cpp     # ROS2 tracker (plain proportional)
+│   │   ├── Turret.{cpp,hpp}             # Pan/tilt turret controller
+│   │   ├── ServoController.{cpp,hpp}    # PWM servo abstraction
+│   │   ├── SignalGenerator.{cpp,hpp}    # Sweep waveforms, bringup tool only
+│   │   ├── sim/pigpiod_if2.h            # No-op pigpio stub (TWO_TOWERS_SIM_GPIO)
+│   │   └── trees/basic_track.xml        # Reference tree (node runs an inline copy)
 │   └── python/
 │       └── two_towers_detector_node.py  # YOLO detection + Flask
 ├── msg/
@@ -239,40 +301,75 @@ two-towers/
 ├── config/
 │   ├── tower_a.yaml                  # Tower A pins, camera calibration
 │   └── tower_b.yaml                  # Tower B pins, camera calibration
+├── scripts/
+│   ├── bootstrap_pi.sh               # Provision a fresh Pi end to end
+│   ├── install_systemd.sh            # Install the unit + /etc/two-towers
+│   └── run_tower.sh                  # What the unit executes; runnable by hand
+├── deploy/systemd/
+│   ├── two-towers@.service           # Templated per-tower unit
+│   └── tower.env.template            # Seed for /etc/two-towers/tower.env
 ├── tests/
-│   ├── cpp/menu.cpp                  # Interactive servo testing
+│   ├── cpp/menu.cpp                  # Interactive servo bringup tool
 │   └── python/test_*.py              # Vision pipeline tests
 ├── CMakeLists.txt                    # ROS2 build configuration
 ├── package.xml                       # ROS2 package manifest
-└── requirements.txt                  # Python dependencies
+└── requirements.txt                  # Python dependencies (pip only; see file)
 ```
 
 ---
 
 ## Configuration
 
-Key parameters can be tuned in the source files:
+Settings come from three places, in increasing order of how much you should
+have to rebuild to change them.
 
-### Tracking Control (`orthanc_tracker_node.cpp`)
-```cpp
-static constexpr double DEADBAND = 0.05;           // 5% center tolerance
-static constexpr double GAIN_LARGE = 8.0;          // Fast acquisition
-static constexpr double GAIN_FINE = 2.0;           // Fine centering
-static constexpr double MAX_ADJUSTMENT = 2.0;      // Max degrees per tick
-static constexpr int SCAN_THRESHOLD_FRAMES = 60;   // Frames before scanning
+### Per-tower parameters (`config/tower_a.yaml`, `config/tower_b.yaml`)
+
+Runtime ROS 2 parameters — no rebuild needed. GPIO pins, camera FOV and stream
+port live here, which is why neither node contains a tower-specific string:
+
+```yaml
+/**/two_towers_detector:
+  ros__parameters:
+    enable_streaming: true
+    stream_port: 5000
+    camera_fov_horizontal_deg: 62.2   # measured, not from a datasheet
+    camera_fov_vertical_deg: 48.8
+
+/**/orthanc_tracker_bt:
+  ros__parameters:
+    pan_pin: 17     # BCM numbering, not physical header position
+    tilt_pin: 27
 ```
 
-### Detection (`two_towers_detector_node.py`)
+Tower B defaults to pins 22/23 and port 5001 so both turrets can be driven from
+one Pi's header during bringup.
+
+### Deployment settings (`/etc/two-towers/tower.env`)
+
+Workspace and venv paths, `ROS_DOMAIN_ID`, and extra launch arguments. Read by
+the systemd unit; see `deploy/systemd/tower.env.template`.
+
+### Compiled-in constants (require a rebuild)
+
+Control law, in `src/cpp/orthanc_tracker_node_bt.cpp`:
+
+```cpp
+const double deadband = 0.08;       // center tolerance, widened to stop oscillation
+double max_adj = 1.5 + speed * 0.8; // degrees per tick, capped at 3.0
+state.get_predicted_target(0.15, ...);  // 150 ms lookahead for system latency
+```
+
+Detection, in `src/python/two_towers_detector_node.py`:
+
 ```python
 DETECTION_RATE_HZ = 15.0          # Detection frequency
 YOLO_CONFIDENCE_THRESHOLD = 0.25  # Minimum detection confidence
 YOLO_INPUT_SIZE = 160             # Model input (smaller = faster)
 ```
 
-### Hardware (GPIO pins)
-- **Pan Servo**: GPIO 17
-- **Tilt Servo**: GPIO 27
-- **PWM Range**: 500-2500 μs (0°-180°)
+PWM range is 500–2500 μs for 0°–180°, set in `ServoController`'s constructor
+defaults.
 
 ---
 
@@ -304,6 +401,47 @@ ros2 topic list
 # Echo detection messages
 ros2 topic echo /tower_a/detections
 ```
+
+If two towers on separate Pis cannot see each other's topics, check
+`ROS_DOMAIN_ID` matches on both (`/etc/two-towers/tower.env`, default 42). If
+they match and it still fails over Wi-Fi but works over Ethernet, the cause is
+usually the access point dropping or rate-limiting multicast between wireless
+clients — DDS discovery depends on it.
+
+### `ModuleNotFoundError: No module named 'rclpy'`
+
+The venv was created without `--system-site-packages`. rclpy is installed by
+apt into `/opt/ros/jazzy` and has no PyPI package, so an isolated venv cannot
+see it. Re-running `./scripts/bootstrap_pi.sh` detects and rebuilds a venv
+made the wrong way.
+
+### `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x`
+
+Something installed numpy ≥ 2 into the venv. Ubuntu 24.04 ships numpy 1.26 and
+every ROS 2 Jazzy C extension — including the generated `two_towers.msg`
+modules — is compiled against that ABI. `requirements.txt` caps numpy below 2
+for exactly this reason; check nothing has upgraded past it:
+
+```bash
+./venv/bin/pip install -r requirements.txt
+```
+
+### Detector dies inside `YOLO()` under systemd but works by hand
+
+ultralytics needs a writable config directory and somewhere to download
+`yolov8n.pt`. The unit points `HOME` and `YOLO_CONFIG_DIR` at
+`/var/lib/two-towers` via `StateDirectory=`; if you wrote your own unit, that
+is what is missing.
+
+### Build fails at `find_package(behaviortree_cpp)`
+
+```bash
+sudo apt install ros-jazzy-behaviortree-cpp
+```
+
+There is no fallback path — the behavior tree node is the only tracker, so the
+build fails at configure time rather than producing a package with no tracker
+in it.
 
 ---
 
