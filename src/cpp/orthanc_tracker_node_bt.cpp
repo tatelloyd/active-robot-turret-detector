@@ -45,6 +45,27 @@ struct TrackerState {
     int frames_at_limit = 0;
     const int MAX_FRAMES_AT_LIMIT = 20;  // 1.3 seconds at 15Hz
 
+    // Dropout tolerance before declaring the target lost.
+    //
+    // The detector publishes an EMPTY DetectionArray on any frame where YOLO
+    // finds no acceptable person -- a turned head, a confidence dip below 0.30,
+    // a step within 5% of the frame edge. Treating the first empty message as
+    // "target lost" made a single dropped frame drive the tree into
+    // IntelligentScan, which yanks the pan servo 15 degrees off the target and
+    // then swings back when the next frame re-acquires. That is the
+    // Track/Scan flapping visible in the logs, sometimes 29 ms apart.
+    //
+    // The proportional tracker this node replaced already got this right:
+    // SCAN_THRESHOLD_FRAMES = 60, with a "brief dropout: hold position" branch.
+    // Collapsing to a single control path dropped the tolerance and kept the
+    // scan. This restores it.
+    //
+    // 15 frames rather than 60 because the detection loop measures ~8 Hz on a
+    // Pi 4, not the 15 Hz the timer nominally requests -- so this is ~1.9 s of
+    // tolerance, close to the ~4 s that 60 frames bought at the real rate.
+    int frames_without_detection = 0;
+    static constexpr int LOSS_THRESHOLD_FRAMES = 15;
+
     static TrackerState& get() {
         static TrackerState instance;
         return instance;
@@ -98,11 +119,44 @@ struct TrackerState {
     void clear_target() {
         has_target = false;
         frames_at_limit = 0;
+        frames_without_detection = 0;
         velocity_x = 0.0;
         velocity_y = 0.0;
         raw_velocity_x = 0.0;
         raw_velocity_y = 0.0;
         velocity_initialized = false;
+    }
+
+    // A frame arrived with no acceptable person in it. Returns true while the
+    // target should still be considered held, false once it is genuinely lost.
+    bool tolerate_dropout() {
+        if (!has_target) {
+            return false;  // nothing to hold on to; scan
+        }
+
+        if (++frames_without_detection > LOSS_THRESHOLD_FRAMES) {
+            if (node) {
+                RCLCPP_INFO(node->get_logger(),
+                    "Target lost after %d frames without a detection - scanning",
+                    LOSS_THRESHOLD_FRAMES);
+            }
+            clear_target();
+            return false;
+        }
+
+        // Hold the last known position, but stop extrapolating from it. The
+        // 150 ms lookahead in SmoothTrack is only meaningful against a fresh
+        // measurement; run it against a stale one for a second and the turret
+        // walks away from a target that never moved.
+        velocity_x = 0.0;
+        velocity_y = 0.0;
+        raw_velocity_x = 0.0;
+        raw_velocity_y = 0.0;
+
+        // The next real detection must not compute velocity across the gap.
+        velocity_initialized = false;
+
+        return true;
     }
 };
 
@@ -116,9 +170,13 @@ public:
     BT::NodeStatus tick() override {
         auto& state = TrackerState::get();
         
+        // An empty array is the detector explicitly saying "no person this
+        // frame", not a missing message. Either way it is a dropout, and a
+        // dropout is only a lost target once it persists. See
+        // TrackerState::tolerate_dropout.
         if (!state.latest_detections || state.latest_detections->detections.empty()) {
-            state.clear_target();
-            return BT::NodeStatus::FAILURE;
+            return state.tolerate_dropout() ? BT::NodeStatus::SUCCESS
+                                            : BT::NodeStatus::FAILURE;
         }
 
         // Find best person (closest to center, highest confidence)
@@ -139,14 +197,20 @@ public:
             }
         }
 
+        // Detections arrived but none of them were people. Same dropout, same
+        // tolerance -- this path is reachable whenever the detector publishes
+        // only non-person classes.
         if (!best_person) {
-            state.clear_target();
-            return BT::NodeStatus::FAILURE;
+            return state.tolerate_dropout() ? BT::NodeStatus::SUCCESS
+                                            : BT::NodeStatus::FAILURE;
         }
-        
+
+        // A real measurement: the dropout run, if any, is over.
+        state.frames_without_detection = 0;
+
         // Update target with filtering
         state.update_target(best_person->x, best_person->y);
-        
+
         return BT::NodeStatus::SUCCESS;
     }
 };

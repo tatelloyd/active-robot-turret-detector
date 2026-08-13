@@ -47,6 +47,26 @@ numpy>=1.26,<2
 ultralytics>=8.3,<9
 flask>=3.0,<4
 
+# torch is pinned, and it is pinned low. Do not relax this without testing on
+# the hardware.
+#
+# The Pi 4 is a Cortex-A72: ARMv8.0-A, whose CPU flags are exactly
+# "fp asimd evtstrm crc32 cpuid" -- no asimddp, no fp16, no SVE. PyPI's default
+# aarch64 torch wheel is now the NVIDIA build (2.13.0+cu130 at time of
+# writing), compiled for Neoverse-class ARMv8.2+ cores. Installed on a Pi it
+# does not merely lack a GPU: a bare 64x64 matmul dies with SIGILL, and the
+# detector is killed by signal 4 the moment the first inference runs.
+#
+# It also drags in the entire CUDA userspace -- cuda-toolkit, cudnn, nccl,
+# cusparselt, nvshmem, triton -- which measured 3.5 GB of unusable libraries
+# on a 32 GB card.
+#
+# 2.2.2 is the last line whose PyPI aarch64 wheels are plain CPU builds
+# targeting baseline ARMv8. Verified working on Orthanc: matmul, and YOLOv8n
+# inference at 160px.
+torch==2.2.2
+torchvision==0.17.2
+
 # Deliberately opencv-python and NOT opencv-python-headless, even though the
 # towers are headless servers and nothing here opens a window.
 #

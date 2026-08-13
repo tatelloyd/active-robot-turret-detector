@@ -18,7 +18,7 @@ A high-performance autonomous person tracking system featuring YOLOv8 computer v
 Two Towers demonstrates core principles of autonomous systems engineering:
 
 - **Behavior Tree Architecture**: Modular decision-making framework enabling reactive autonomy
-- **Real-Time Vision Pipeline**: YOLOv8 object detection at 15 Hz with ROS2 message passing
+- **Real-Time Vision Pipeline**: YOLOv8 object detection feeding ROS 2 message passing — measured 8.1 Hz on a Pi 4 (see [Measured Performance](#measured-performance))
 - **Hardware PWM Control**: Jitter-free servo actuation via pigpio daemon (50 Hz control loop)
 - **Embedded Linux Deployment**: Headless operation on resource-constrained hardware
 - **Scalable Design**: Architecture designed for multi-agent extension
@@ -48,7 +48,7 @@ Two Towers demonstrates core principles of autonomous systems engineering:
 │                    VISION PIPELINE (Python)                 │
 │  ┌──────────┐      ┌──────────┐      ┌────────────────┐    │
 │  │  USB Cam │─────▶│ YOLOv8n  │─────▶│  ROS2 Topic    │    │
-│  │  320x240 │      │  15 Hz   │      │  /detections   │    │
+│  │  320x240 │      │ ~8 Hz    │      │  /detections   │    │
 │  └──────────┘      └──────────┘      └────────┬───────┘    │
 │                                               │            │
 │  Optional: Flask video stream on port 5000    │            │
@@ -374,13 +374,43 @@ state.get_predicted_target(0.15, ...);  // 150 ms lookahead for system latency
 Detection, in `src/python/two_towers_detector_node.py`:
 
 ```python
-DETECTION_RATE_HZ = 15.0          # Detection frequency
+DETECTION_RATE_HZ = 15.0          # Timer setpoint, NOT the achieved rate
 YOLO_CONFIDENCE_THRESHOLD = 0.25  # Minimum detection confidence
 YOLO_INPUT_SIZE = 160             # Model input (smaller = faster)
 ```
 
 PWM range is 500–2500 μs for 0°–180°, set in `ServoController`'s constructor
 defaults.
+
+---
+
+## Measured Performance
+
+Numbers from a Raspberry Pi 4 (Cortex-A72, 4 GB) running Ubuntu 24.04 Server,
+YOLOv8n at 160 px input, 320x240 capture. Measured from the detector's own
+periodic log, which reports achieved rate alongside the setpoint:
+
+| Configuration | ms/frame | Achieved |
+|---|---|---|
+| `enable_streaming:=true` (default) | 167.5 | **6.0 Hz** |
+| `enable_streaming:=false` | 123.3 | **8.1 Hz** |
+
+**`DETECTION_RATE_HZ = 15.0` is a timer setpoint, not an achieved rate.** YOLO
+inference alone costs ~120 ms on this hardware against a 66.7 ms timer period,
+so the timer overruns every tick and the loop free-runs at whatever inference
+allows. The 15 Hz figure this README used to advertise was never measured on
+the robot; it is retained as a target because it is what NCNN export should
+make reachable.
+
+The MJPEG debug stream costs **44 ms/frame — 26% of the loop.** Annotation
+draws every box, the crosshair and both zone rectangles inside the detection
+callback, then JPEG-encodes at quality 85, all competing with inference. Run
+with `enable_streaming:=false` for tracking quality; turn it on to debug what
+the detector sees.
+
+Reaching 15 Hz needs a 1.85x speedup from the streaming-off baseline.
+Ultralytics' NCNN export is the intended route and typically gives 2-3x on
+this hardware; it is not yet implemented here.
 
 ---
 
@@ -443,6 +473,35 @@ ultralytics needs a writable config directory and somewhere to download
 `yolov8n.pt`. The unit points `HOME` and `YOLO_CONFIG_DIR` at
 `/var/lib/two-towers` via `StateDirectory=`; if you wrote your own unit, that
 is what is missing.
+
+### Detector dies with `Illegal instruction (core dumped)` / exit code −4
+
+PyPI's default aarch64 torch wheel is the NVIDIA build (`+cu130`), compiled for
+ARMv8.2+ Neoverse cores. The Pi 4's Cortex-A72 is ARMv8.0 — check with:
+
+```bash
+lscpu | grep -E "Model name|Flags"
+```
+
+No `asimddp` in the flags means a modern torch wheel will SIGILL on the first
+matmul. `requirements.txt` pins `torch==2.2.2`, the last line whose aarch64
+wheels are plain CPU builds targeting baseline ARMv8. Verify with:
+
+```bash
+./venv/bin/python -c "import torch; print(torch.__version__); a=torch.rand(64,64); print((a@a).sum().item())"
+```
+
+A version ending in `+cu` is the wrong wheel. Reinstalling needs an explicit
+uninstall first — `pip install --index-url ...` will report "Requirement
+already satisfied" and change nothing.
+
+### Turret oscillates, or flips between tracking and scanning
+
+Fixed by the dropout tolerance in `HasPersonDetection`. If you see `🎯 Track`
+and `🔍 Scan` alternating within milliseconds, the tracker is treating a single
+dropped detection frame as a lost target. Confirm `LOSS_THRESHOLD_FRAMES` is
+present in `src/cpp/orthanc_tracker_node_bt.cpp` and that you rebuilt after
+pulling.
 
 ### `ImportError: libGL.so.1: cannot open shared object file`
 
