@@ -22,6 +22,23 @@
 
 set -euo pipefail
 
+# Ubuntu Server runs needrestart automatically after apt, and it will restart
+# whatever it thinks is stale -- including systemd-resolved, systemd-networkd
+# and netplan-wpa-wlan0. On a Pi provisioning over Wi-Fi that means DNS and the
+# network drop out for a few seconds in the middle of this script, and the very
+# next thing needing the network fails. Observed on a clean card as:
+#
+#   ==> Installing pigpio
+#       building pigpio v79 from source
+#   fatal: unable to access 'https://github.com/joan2937/pigpio.git/':
+#          Could not resolve host: github.com
+#
+# Suspending needrestart defers those restarts to the operator's next reboot,
+# which is the right time for them anyway. DEBIAN_FRONTEND keeps apt from
+# blocking on a config prompt nobody is watching.
+export NEEDRESTART_SUSPEND=1
+export DEBIAN_FRONTEND=noninteractive
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -68,6 +85,40 @@ step() { echo; echo "${BOLD}==> $*${RESET}"; }
 info() { echo "    $*"; }
 warn() { echo "${YELLOW}    warning: $*${RESET}" >&2; }
 die()  { echo "${RED}error: $*${RESET}" >&2; exit 1; }
+
+# Block until DNS answers, up to ~60s.
+#
+# Belt and braces alongside NEEDRESTART_SUSPEND: that stops this script from
+# causing the outage, but a Pi provisioning over a mesh access point can lose
+# name resolution on its own. Failing a 20-minute provision because a resolver
+# blinked is a bad trade for a loop this short.
+wait_for_dns() {
+  local host="${1:-github.com}" i
+  for i in $(seq 1 30); do
+    if getent hosts "$host" >/dev/null 2>&1; then
+      [ "$i" -eq 1 ] || info "DNS recovered after $(( (i - 1) * 2 ))s"
+      return 0
+    fi
+    [ "$i" -eq 1 ] && info "waiting for DNS to resolve ${host}..."
+    sleep 2
+  done
+  die "cannot resolve ${host} after 60s -- check the network and re-run"
+}
+
+# git clone, tolerating a transient network. Same rationale as wait_for_dns.
+retry_clone() {
+  local url="$1" dest="$2" i
+  for i in 1 2 3; do
+    sudo rm -rf "$dest"
+    if sudo git clone --quiet --depth 1 --branch "$PIGPIO_VERSION" "$url" "$dest"; then
+      return 0
+    fi
+    warn "clone attempt ${i}/3 failed; retrying in 5s"
+    sleep 5
+    wait_for_dns "github.com"
+  done
+  die "could not clone ${url} after 3 attempts"
+}
 
 # ---------------------------------------------------------------------------
 # Preflight
@@ -122,6 +173,9 @@ else
     # sources entry together, so a key rotation is an apt upgrade rather than a
     # fleet-wide breakage. Every guide predating mid-2025 still shows the old
     # method; it stopped working when the original key expired.
+    # The apt run just above can take the resolver with it; see wait_for_dns.
+    wait_for_dns "api.github.com"
+
     APT_SOURCE_VERSION="$(
       curl -fsSL --max-time 15 https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest 2>/dev/null \
         | grep -F '"tag_name"' | awk -F'"' '{print $4}'
@@ -199,9 +253,10 @@ else
     info "pigpio already installed ($(command -v pigpiod))"
   else
     info "building pigpio ${PIGPIO_VERSION} from source (a few minutes on a Pi)"
-    sudo rm -rf "$PIGPIO_SRC"
-    sudo git clone --quiet --depth 1 --branch "$PIGPIO_VERSION" \
-      https://github.com/joan2937/pigpio.git "$PIGPIO_SRC"
+    # apt just ran, and on Ubuntu Server that may have taken the resolver down
+    # with it. Confirm DNS is actually back before assuming it.
+    wait_for_dns "github.com"
+    retry_clone "https://github.com/joan2937/pigpio.git" "$PIGPIO_SRC"
     sudo make -C "$PIGPIO_SRC" -j"$(nproc)"
     # `make install` also runs `python3 setup.py install`, which is deprecated
     # on 3.12 and emits a wall of setuptools warnings. It still succeeds, and
