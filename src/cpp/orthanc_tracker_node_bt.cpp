@@ -3,15 +3,15 @@
 #include <behaviortree_cpp/behavior_tree.h>
 #include <behaviortree_cpp/bt_factory.h>
 #include "Turret.hpp"
-// std::clamp and std::this_thread::sleep_for are both used below. Neither was
-// included directly; the build only worked because rclcpp and BehaviorTree.CPP
-// happened to drag <algorithm> and <thread> in transitively. That is exactly
-// the kind of dependency a toolchain bump breaks, so name them explicitly.
+// std::clamp is used throughout the control law. It was not included directly;
+// the build only worked because rclcpp and BehaviorTree.CPP happened to drag
+// <algorithm> in transitively, which is exactly the kind of dependency a
+// toolchain bump breaks. <thread> was here for the servo-pacing sleep that the
+// freshness gate replaced, and is no longer needed.
 #include <algorithm>
 #include <memory>
 #include <cmath>
 #include <chrono>
-#include <thread>
 
 // Shared state between ROS2 node and BehaviorTree
 struct TrackerState {
@@ -66,6 +66,24 @@ struct TrackerState {
     int frames_without_detection = 0;
     static constexpr int LOSS_THRESHOLD_FRAMES = 15;
 
+    // Set when a detection updates the target, cleared once the control law
+    // has acted on it. One measurement produces exactly one servo command.
+    //
+    // Without this the loop runs open-loop half the time: the tree ticks at
+    // 15 Hz but detections arrive at ~8 Hz, so every measurement was acted on
+    // roughly twice. The second correction is issued against a position the
+    // servo has already moved toward but the camera has not re-observed, so
+    // the loop integrates its own output and overshoots. Past centre the
+    // target appears on the opposite side of the frame and the same thing
+    // happens in reverse -- a limit cycle. It shows up in the logs as the
+    // target's x alternating across centre far faster than a person moves:
+    //
+    //   0.130 -> 0.608 -> 0.292 -> 0.752 -> 0.254 -> 0.154 -> 0.771 -> 0.166
+    //
+    // Gating on freshness makes the control loop run at the sensor rate,
+    // which is the only rate at which feedback actually exists.
+    bool measurement_fresh = false;
+
     static TrackerState& get() {
         static TrackerState instance;
         return instance;
@@ -104,6 +122,7 @@ struct TrackerState {
         target_x = filtered_x;
         target_y = filtered_y;
         has_target = true;
+        measurement_fresh = true;
     }
     
     void get_predicted_target(double lookahead_sec, double& pred_x, double& pred_y) {
@@ -120,6 +139,7 @@ struct TrackerState {
         has_target = false;
         frames_at_limit = 0;
         frames_without_detection = 0;
+        measurement_fresh = false;
         velocity_x = 0.0;
         velocity_y = 0.0;
         raw_velocity_x = 0.0;
@@ -229,6 +249,16 @@ public:
             return BT::NodeStatus::FAILURE;
         }
 
+        // Nothing new has been seen since the last command. Hold position
+        // rather than steering again on a measurement already acted upon --
+        // see TrackerState::measurement_fresh. This is also what makes a
+        // dropout a genuine hold: HasPersonDetection keeps the target alive
+        // across brief gaps, but no fresh measurement means no new command.
+        if (!state.measurement_fresh) {
+            return BT::NodeStatus::SUCCESS;
+        }
+        state.measurement_fresh = false;
+
         double current_pan = state.turret->getPanAngle();
         double current_tilt = state.turret->getTiltAngle();
         
@@ -279,11 +309,21 @@ public:
         state.turret->setPanAngle(new_pan);
         state.turret->setTiltAngle(new_tilt);
 
-        // Small delay proportional to movement
-        double total_movement = std::abs(pan_adj) + std::abs(tilt_adj);
-        int wait_ms = std::min(80, static_cast<int>(30 + total_movement * 15));
-        std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
-        
+        // The sleep that used to sit here (30-80 ms, "let the servo travel")
+        // is gone, and its removal matters more than it looks.
+        //
+        // This runs inside the behavior tree's timer callback on a
+        // single-threaded executor. Sleeping here does not just pace the
+        // servos -- it blocks the very executor that delivers /detections,
+        // so the tracker was delaying its own sensor input by up to 80 ms per
+        // tick and then correcting against the staler measurement that
+        // caused.
+        //
+        // Pacing is now inherent: with the freshness gate above, the next
+        // command cannot be issued until the next detection arrives, ~130 ms
+        // later at the measured rate. That is a longer settling window than
+        // the sleep ever provided, and it costs no latency.
+
         // Log occasionally
         static int log_count = 0;
         if (++log_count % 20 == 0 && state.node) {
