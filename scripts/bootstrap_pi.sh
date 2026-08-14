@@ -93,7 +93,12 @@ die()  { echo "${RED}error: $*${RESET}" >&2; exit 1; }
 # name resolution on its own. Failing a 20-minute provision because a resolver
 # blinked is a bad trade for a loop this short.
 wait_for_dns() {
-  local host="${1:-github.com}" i
+  # Host is required, deliberately. A default would encode one hostname as
+  # "the important one" when the point is to check the specific dependency the
+  # next command needs -- DNS can come back partially, and a generic probe that
+  # passes while the host you actually want still fails just walks you into the
+  # failure this exists to prevent.
+  local host="${1:?wait_for_dns needs a hostname}" i
   for i in $(seq 1 30); do
     if getent hosts "$host" >/dev/null 2>&1; then
       [ "$i" -eq 1 ] || info "DNS recovered after $(( (i - 1) * 2 ))s"
@@ -107,7 +112,14 @@ wait_for_dns() {
 
 # git clone, tolerating a transient network. Same rationale as wait_for_dns.
 retry_clone() {
-  local url="$1" dest="$2" i
+  local url="$1" dest="$2" i host
+  # Derive the host from the URL rather than naming one. Checking a hardcoded
+  # github.com while cloning from somewhere else would report the wrong thing.
+  host="${url#*://}"   # strip scheme
+  host="${host%%/*}"   # strip path
+  host="${host##*@}"   # strip any user info
+  host="${host%%:*}"   # strip port -- getent wants a bare hostname
+
   for i in 1 2 3; do
     sudo rm -rf "$dest"
     if sudo git clone --quiet --depth 1 --branch "$PIGPIO_VERSION" "$url" "$dest"; then
@@ -115,7 +127,7 @@ retry_clone() {
     fi
     warn "clone attempt ${i}/3 failed; retrying in 5s"
     sleep 5
-    wait_for_dns "github.com"
+    wait_for_dns "$host"
   done
   die "could not clone ${url} after 3 attempts"
 }
