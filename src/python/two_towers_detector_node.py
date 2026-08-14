@@ -591,16 +591,28 @@ class TwoTowersDetectorNode(Node):
         else:
             self._publish_empty_detection()
 
-        # Periodic logging
+        # Periodic logging, including the ACHIEVED loop rate.
+        #
+        # DETECTION_RATE_HZ is a timer setpoint, not a measurement. If a pass
+        # through this callback takes longer than the timer period, the timer
+        # simply overruns and the real rate silently drops -- which is what
+        # happens on a Pi 4, where YOLO inference alone is ~120 ms against a
+        # 66.7 ms period. Reporting the measured rate turns "why is tracking
+        # jerky" into a number instead of an inference from log timestamps.
         self.frame_count += 1
         if self.frame_count % 20 == 0:
+            elapsed = time.time() - self.start_time
+            measured_hz = self.frame_count / elapsed if elapsed > 0 else 0.0
+            rate = f"[{measured_hz:.1f}/{self.DETECTION_RATE_HZ:.0f} Hz]"
+
             if current_detection:
                 stable = " (stable)" if current_detection.get('stable', False) else ""
                 self.get_logger().info(
-                    f"Person{stable} @ ({current_detection['x']:.3f}, {current_detection['y']:.3f})"
+                    f"{rate} Person{stable} @ "
+                    f"({current_detection['x']:.3f}, {current_detection['y']:.3f})"
                 )
             else:
-                self.get_logger().info("No person detected")
+                self.get_logger().info(f"{rate} No person detected")
 
     def _publish_detection(self, det: dict):
         """
@@ -637,10 +649,17 @@ class TwoTowersDetectorNode(Node):
         # Empty detections array signals "no person found"
         self.publisher_.publish(msg)
 
+    def release_camera(self):
+        """Release the capture device. Safe to call more than once."""
+        cap = getattr(self, 'cap', None)
+        if cap is not None and cap.isOpened():
+            cap.release()
+
     def __del__(self):
-        """Cleanup: release camera on node destruction."""
-        if hasattr(self, 'cap'):
-            self.cap.release()
+        # Kept as a backstop only. __del__ runs at an unpredictable point
+        # during interpreter teardown, by which time cv2 may already be
+        # partially finalized; main() releases the camera explicitly.
+        self.release_camera()
 
 
 # =============================================================================
@@ -651,13 +670,32 @@ def main(args=None):
     """ROS2 node entry point."""
     rclpy.init(args=args)
 
+    node = None
     try:
         node = TwoTowersDetectorNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
+        # Expected on Ctrl+C and on `systemctl stop`, which sends SIGINT
+        # because the unit sets KillSignal=SIGINT.
         pass
     finally:
-        rclpy.shutdown()
+        if node is not None:
+            node.release_camera()
+            node.destroy_node()
+
+        # rclpy.shutdown() raises RCLError("rcl_shutdown already called") if
+        # the context is already down, and under ros2 launch it usually is:
+        # the SIGINT handler shuts it down before this block runs. The
+        # unguarded call meant every clean Ctrl+C ended in a traceback and a
+        # non-zero exit -- exit 1 normally, and SIGABRT when the Flask thread
+        # was running, since the exception propagated through interpreter
+        # teardown with a live non-daemon thread.
+        #
+        # That matters beyond tidiness: the systemd unit stops this node with
+        # SIGINT, so every `systemctl stop` would log a crash and wait out
+        # TimeoutStopSec before being killed.
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
