@@ -84,6 +84,25 @@ struct TrackerState {
     // which is the only rate at which feedback actually exists.
     bool measurement_fresh = false;
 
+    // Set by the subscription callback when a genuinely new message lands.
+    //
+    // latest_detections is a retained shared_ptr: it keeps pointing at the
+    // last message until the next one arrives. Without this flag the tree
+    // re-derives everything from the SAME observation on every tick, which
+    // made two things quietly wrong:
+    //
+    //   - measurement_fresh was re-armed 15 times a second inside
+    //     update_target(), so the freshness gate it was added for never once
+    //     held a tick back. Acted-tick rate stayed at 14.93/s -- the raw
+    //     timer rate -- instead of dropping to the ~8/s the detector runs at.
+    //
+    //   - frames_without_detection counted TICKS, not frames, so
+    //     LOSS_THRESHOLD_FRAMES = 15 meant 1.0 s at the tick rate rather than
+    //     ~1.9 s at the detection rate.
+    //
+    // Gating on this makes "per frame" mean per frame everywhere below.
+    bool new_message = false;
+
     static TrackerState& get() {
         static TrackerState instance;
         return instance;
@@ -189,7 +208,22 @@ public:
     
     BT::NodeStatus tick() override {
         auto& state = TrackerState::get();
-        
+
+        // Only reason about the world when the world has been re-observed.
+        // The tree ticks at 15 Hz; detections arrive at ~8 Hz. Re-deriving
+        // the target from a message already consumed does not produce new
+        // information, it just re-runs the filters and re-arms the freshness
+        // flag. Everything downstream of here is therefore per-FRAME.
+        //
+        // Holding the previous verdict is correct: if a target was being
+        // tracked it is still being tracked, and SmoothTrack will hold
+        // position because measurement_fresh stays false.
+        if (!state.new_message) {
+            return state.has_target ? BT::NodeStatus::SUCCESS
+                                    : BT::NodeStatus::FAILURE;
+        }
+        state.new_message = false;
+
         // An empty array is the detector explicitly saying "no person this
         // frame", not a missing message. Either way it is a dropout, and a
         // dropout is only a lost target once it persists. See
@@ -451,7 +485,10 @@ public:
             "detections",
             10,
             [this](two_towers::msg::DetectionArray::SharedPtr msg) {
-                TrackerState::get().latest_detections = msg;
+                auto& state = TrackerState::get();
+                state.latest_detections = msg;
+                // This is the only place the world is genuinely re-observed.
+                state.new_message = true;
             }
         );
 
