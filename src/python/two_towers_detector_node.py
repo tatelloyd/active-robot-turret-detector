@@ -473,8 +473,9 @@ class TwoTowersDetectorNode(Node):
         # Initialize temporal smoothing tracker
         self.tracker = RelaxedTracker(buffer_size=3)
 
-        # Frame counter for periodic logging
+        # Frame counter and rate-reporting window for periodic logging
         self.start_time = time.time()
+        self.last_rate_report_time = self.start_time
         self.frame_count = 0
 
         # Create detection timer at specified rate
@@ -599,10 +600,17 @@ class TwoTowersDetectorNode(Node):
         # happens on a Pi 4, where YOLO inference alone is ~120 ms against a
         # 66.7 ms period. Reporting the measured rate turns "why is tracking
         # jerky" into a number instead of an inference from log timestamps.
+        # Measured over the last reporting window, not since startup. A
+        # cumulative average is dominated by the slow first seconds (model
+        # load, camera warm-up) and converges toward the true rate so slowly
+        # that it reads as a rate that is still climbing: 2.8, 4.2, 5.0, 5.6
+        # ... when the loop had in fact been steady at ~8 Hz the whole time.
         self.frame_count += 1
         if self.frame_count % 20 == 0:
-            elapsed = time.time() - self.start_time
-            measured_hz = self.frame_count / elapsed if elapsed > 0 else 0.0
+            now = time.time()
+            window = now - self.last_rate_report_time
+            measured_hz = 20.0 / window if window > 0 else 0.0
+            self.last_rate_report_time = now
             rate = f"[{measured_hz:.1f}/{self.DETECTION_RATE_HZ:.0f} Hz]"
 
             if current_detection:
