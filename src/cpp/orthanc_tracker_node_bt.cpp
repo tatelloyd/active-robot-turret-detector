@@ -1,5 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <two_towers/msg/detection_array.hpp>
+#include <two_towers/msg/tower_status.hpp>
 #include <behaviortree_cpp/behavior_tree.h>
 #include <behaviortree_cpp/bt_factory.h>
 #include "Turret.hpp"
@@ -12,6 +13,8 @@
 #include <memory>
 #include <cmath>
 #include <chrono>
+#include <limits>
+#include <string>
 
 // Shared state between ROS2 node and BehaviorTree
 struct TrackerState {
@@ -84,6 +87,13 @@ struct TrackerState {
     // which is the only rate at which feedback actually exists.
     bool measurement_fresh = false;
 
+    // Detector confidence for the current target, and whether the control law
+    // considers it centred. Neither affects tracking; both are published in
+    // TowerStatus so another tower -- or a human watching the graph -- can
+    // tell a firm lock from a marginal one.
+    double target_confidence = 0.0;
+    bool centered = false;
+
     // Set by the subscription callback when a genuinely new message lands.
     //
     // latest_detections is a retained shared_ptr: it keeps pointing at the
@@ -154,10 +164,40 @@ struct TrackerState {
         pred_y = std::clamp(pred_y, 0.0, 1.0);
     }
     
+    // Seconds until the target crosses a frame edge at its current velocity.
+    // Negative means "not applicable": no target, or it is not heading for an
+    // edge. This is the geometry-free half of handoff -- it says WHEN a tower
+    // is about to lose someone without needing to know where the other tower
+    // is. Acting on it needs relative pose, which nothing has yet.
+    double seconds_to_frame_edge() const {
+        if (!has_target) {
+            return -1.0;
+        }
+
+        constexpr double kMoving = 1e-3;
+        double soonest = std::numeric_limits<double>::infinity();
+
+        if (velocity_x > kMoving) {
+            soonest = std::min(soonest, (1.0 - target_x) / velocity_x);
+        } else if (velocity_x < -kMoving) {
+            soonest = std::min(soonest, target_x / -velocity_x);
+        }
+
+        if (velocity_y > kMoving) {
+            soonest = std::min(soonest, (1.0 - target_y) / velocity_y);
+        } else if (velocity_y < -kMoving) {
+            soonest = std::min(soonest, target_y / -velocity_y);
+        }
+
+        return std::isinf(soonest) ? -1.0 : soonest;
+    }
+
     void clear_target() {
         has_target = false;
         frames_at_limit = 0;
         frames_without_detection = 0;
+        target_confidence = 0.0;
+        centered = false;
         measurement_fresh = false;
         velocity_x = 0.0;
         velocity_y = 0.0;
@@ -261,6 +301,7 @@ public:
 
         // A real measurement: the dropout run, if any, is over.
         state.frames_without_detection = 0;
+        state.target_confidence = best_person->confidence;
 
         // Update target with filtering
         state.update_target(best_person->x, best_person->y);
@@ -311,12 +352,14 @@ public:
 
         // If centered, we're done
         if (x_error == 0.0 && y_error == 0.0) {
+            state.centered = true;
             static int log_count = 0;
             if (++log_count % 30 == 0 && state.node) {
                 RCLCPP_INFO(state.node->get_logger(), "🎯 Centered on target");
             }
             return BT::NodeStatus::SUCCESS;
         }
+        state.centered = false;
 
         // ADAPTIVE gains based on velocity magnitude
         double speed = std::sqrt(state.velocity_x * state.velocity_x + 
@@ -478,6 +521,14 @@ public:
         state.node = this;
         state.last_tick_time = std::chrono::steady_clock::now();
 
+        // Which tower this is comes from the namespace, exactly as it does for
+        // the detector. No tower-specific string is compiled into this binary.
+        tower_id_ = std::string(this->get_namespace());
+        tower_id_.erase(0, tower_id_.find_first_not_of('/'));
+        if (tower_id_.empty()) {
+            tower_id_ = "tower_a";
+        }
+
         // Subscribe to detections on a RELATIVE topic. Which tower this node
         // belongs to is decided by the namespace it is launched into
         // (/tower_a/detections, /tower_b/detections, ...), not by this code.
@@ -492,9 +543,31 @@ public:
             }
         );
 
+        // Publish this tower's state on a RELATIVE topic, so the namespace
+        // resolves it to /tower_a/status, /tower_b/status, and so on.
+        //
+        // Nothing consumes this yet. It exists because every form of
+        // coordination -- cooperative tracking, handoff, a coordinator node,
+        // an operator dashboard -- needs each tower to say what it is doing,
+        // and none of them can be built until it does. It is also the cheapest
+        // way to watch the whole system: `ros2 topic echo /tower_a/status`
+        // from either machine.
+        status_pub_ = this->create_publisher<two_towers::msg::TowerStatus>("status", 10);
+
+        // 5 Hz, deliberately decoupled from the 15 Hz control tick. Status is
+        // for observers, not for the control loop, and republishing state at
+        // the tick rate would put three times the traffic on a Wi-Fi link that
+        // both towers share for no benefit.
+        status_timer_ = this->create_wall_timer(
+            std::chrono::milliseconds(200),
+            [this]() { publish_status(); }
+        );
+
         RCLCPP_INFO(this->get_logger(), "Pan GPIO %d, tilt GPIO %d", pan_pin, tilt_pin);
         RCLCPP_INFO(this->get_logger(), "Subscribed to: %s",
                     subscription_->get_topic_name());
+        RCLCPP_INFO(this->get_logger(), "Publishing status to: %s (tower_id=%s)",
+                    status_pub_->get_topic_name(), tower_id_.c_str());
 
         // Create BehaviorTree
         BT::BehaviorTreeFactory factory;
@@ -533,10 +606,63 @@ public:
     }
 
 private:
+    // Snapshot this tower's state for anyone listening.
+    //
+    // Read-only with respect to TrackerState: publishing status must never
+    // change tracking behaviour, so that turning an observer on or off cannot
+    // move a servo.
+    void publish_status() {
+        const auto& state = TrackerState::get();
+
+        two_towers::msg::TowerStatus msg;
+        msg.header.stamp = this->get_clock()->now();
+        msg.header.frame_id = tower_id_ + "_camera";
+        msg.tower_id = tower_id_;
+
+        msg.pan_angle  = turret_->getPanAngle();
+        msg.tilt_angle = turret_->getTiltAngle();
+
+        msg.has_target = state.has_target;
+        // "locked" distinguishes a target held inside the deadband from one
+        // still being driven toward centre. The remaining values the message
+        // documents -- handoff_requesting, handoff_receiving -- are reserved
+        // until something implements handoff.
+        msg.state = state.has_target ? (state.centered ? "locked" : "tracking")
+                                     : "scanning";
+
+        // Normalized image coordinates, not a position in the room. Turning
+        // these into a shared frame is the extrinsic calibration that handoff
+        // will need and that nothing has done yet. z is unused.
+        msg.target_position.x = state.has_target ? state.target_x : 0.0;
+        msg.target_position.y = state.has_target ? state.target_y : 0.0;
+        msg.target_position.z = 0.0;
+
+        msg.target_confidence = state.target_confidence;
+        msg.target_velocity_x = state.velocity_x;
+        msg.target_velocity_y = state.velocity_y;
+
+        // Reserved for handoff; no tower requests one yet.
+        msg.handoff_requested = false;
+        msg.handoff_target_tower = "";
+
+        msg.time_to_edge = state.seconds_to_frame_edge();
+
+        // Detector confidence while a target is held, zero otherwise. A richer
+        // measure (dropout history, filter residual) would be a better signal
+        // and is not worth inventing before something consumes it.
+        msg.tracking_confidence = state.has_target ? state.target_confidence : 0.0;
+        msg.frames_since_detection = state.frames_without_detection;
+
+        status_pub_->publish(msg);
+    }
+
+    std::string tower_id_;
     std::unique_ptr<Turret> turret_;
     BT::Tree tree_;
     rclcpp::Subscription<two_towers::msg::DetectionArray>::SharedPtr subscription_;
+    rclcpp::Publisher<two_towers::msg::TowerStatus>::SharedPtr status_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr status_timer_;
 };
 
 // ============================================================================
