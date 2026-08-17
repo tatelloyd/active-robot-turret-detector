@@ -72,6 +72,7 @@ jobs:
           source install/setup.bash
           ros2 launch two_towers tower.launch.py --show-args
           ros2 launch two_towers two_towers.launch.py --show-args
+          ros2 launch two_towers system_view.launch.py --show-args
 
   # ==========================================================================
   # Static checks on the Python detector.
