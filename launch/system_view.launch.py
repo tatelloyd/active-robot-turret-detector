@@ -19,6 +19,8 @@ whether or not anyone is watching, and the view should be restartable without
 touching a turret.
 """
 
+from typing import List
+
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -59,10 +61,15 @@ def generate_launch_description():
         name='system_view',
         parameters=[{
             'port': ParameterValue(LaunchConfiguration('port'), value_type=int),
-            'stream_urls': [
-                ParameterValue(LaunchConfiguration('stream_a'), value_type=str),
-                ParameterValue(LaunchConfiguration('stream_b'), value_type=str),
-            ],
+            # The ParameterValue wraps the WHOLE list, not each element.
+            # Wrapping elements individually raises "Expected 'subvalue' to be
+            # one of [...]" at load time, and a bare list of substitutions is
+            # ambiguous -- launch would concatenate them into one string rather
+            # than build a two-element array. List[str] states which is meant.
+            'stream_urls': ParameterValue(
+                [LaunchConfiguration('stream_a'), LaunchConfiguration('stream_b')],
+                value_type=List[str],
+            ),
         }],
         output='screen',
         emulate_tty=True,
