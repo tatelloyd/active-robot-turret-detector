@@ -21,7 +21,10 @@
 
 /**/orthanc_tracker_bt:
   ros__parameters:
-    # Distinct from tower A so both turrets can be driven from one Pi's header
-    # during bringup. If tower B ends up on its own Pi, 17/27 is fine there too.
-    pan_pin: 22
-    tilt_pin: 23
+    # Same pins as tower A. These were 22/23 when both turrets were going to
+    # share one Pi's header during bringup; tower B now has its own Pi
+    # (barad-dur), so that constraint is gone and one wiring convention across
+    # both towers is worth more than the original intent. Moving a turret
+    # between Pis is now a non-event.
+    pan_pin: 17
+    tilt_pin: 27
