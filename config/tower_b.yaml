@@ -26,5 +26,14 @@
     # (barad-dur), so that constraint is gone and one wiring convention across
     # both towers is worth more than the original intent. Moving a turret
     # between Pis is now a non-event.
+    # The tower this one stands down for. When the peer reports a target
+    # and this tower has none, it holds position instead of sweeping a
+    # room already covered. Leave empty to disable coordination entirely
+    # -- a tower with no peer behaves exactly as it did before.
+    #
+    # Peer status is aged out after 2 s, so a peer that is switched off or
+    # falls off the network cannot leave this tower holding forever.
+    peer_tower_id: "tower_a"
+
     pan_pin: 17
     tilt_pin: 27

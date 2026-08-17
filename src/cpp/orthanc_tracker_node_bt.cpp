@@ -48,6 +48,36 @@ struct TrackerState {
     int frames_at_limit = 0;
     const int MAX_FRAMES_AT_LIMIT = 20;  // 1.3 seconds at 15Hz
 
+    // What the other tower last told us about itself. Updated by the peer
+    // status subscription; only ever read through peer_is_tracking().
+    bool peer_has_target = false;
+    std::chrono::steady_clock::time_point peer_last_status;
+    bool peer_ever_seen = false;
+
+    // True while this tower is deliberately standing down for its peer. Set by
+    // HoldForPeerAction, cleared by whichever node takes over next, so the
+    // transition can be logged once rather than every tick.
+    bool holding_for_peer = false;
+
+    // A peer that has gone quiet must not be able to freeze this tower.
+    //
+    // Without an age check, a peer that crashes or drops off the network while
+    // its last message said has_target=true would leave this tower holding
+    // position forever, waiting on a robot that is no longer there. Status is
+    // published at 5 Hz, so two seconds is ten missed messages -- long enough
+    // to ride out Wi-Fi jitter, short enough that a dead peer returns this
+    // tower to scanning while the room is still worth scanning.
+    static constexpr double PEER_STALE_SEC = 2.0;
+
+    bool peer_is_tracking() const {
+        if (!peer_ever_seen || !peer_has_target) {
+            return false;
+        }
+        const double age = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - peer_last_status).count();
+        return age < PEER_STALE_SEC;
+    }
+
     // Dropout tolerance before declaring the target lost.
     //
     // The detector publishes an EMPTY DetectionArray on any frame where YOLO
@@ -323,6 +353,7 @@ public:
         if (!state.turret || !state.has_target) {
             return BT::NodeStatus::FAILURE;
         }
+        state.holding_for_peer = false;
 
         // Nothing new has been seen since the last command. Hold position
         // rather than steering again on a measurement already acted upon --
@@ -416,6 +447,54 @@ public:
 };
 
 // ============================================================================
+// BehaviorTree Condition: is the other tower already on the target?
+// ============================================================================
+// The first behaviour in this project that depends on the other robot. It is
+// deliberately the weakest possible coupling: one boolean, aged out after two
+// seconds, and no shared coordinate frame. A tower that cannot hear its peer
+// behaves exactly as it did before this existed.
+class PeerHasTarget : public BT::ConditionNode {
+public:
+    PeerHasTarget(const std::string& name) : BT::ConditionNode(name, {}) {}
+
+    BT::NodeStatus tick() override {
+        return TrackerState::get().peer_is_tracking() ? BT::NodeStatus::SUCCESS
+                                                      : BT::NodeStatus::FAILURE;
+    }
+};
+
+// ============================================================================
+// BehaviorTree Action: hold position while the peer has the target
+// ============================================================================
+// Deliberately does nothing to the servos. Holding is a real decision, not an
+// absence of one: the alternative is IntelligentScan sweeping a room another
+// tower is already covering, which both wastes the sweep and looks like two
+// robots unaware of each other.
+//
+// The cost is honest and worth stating: while this tower holds, it is not
+// looking for a SECOND person. That is the right trade for a two-tower demo
+// and the wrong one for actual area coverage.
+class HoldForPeerAction : public BT::SyncActionNode {
+public:
+    HoldForPeerAction(const std::string& name) : BT::SyncActionNode(name, {}) {}
+
+    BT::NodeStatus tick() override {
+        auto& state = TrackerState::get();
+
+        // Log the transition, then stay quiet. Holding is a steady state and
+        // logging it every tick would bury everything else. The flag lives in
+        // TrackerState because the nodes that END a hold -- SmoothTrack and
+        // IntelligentScan -- are the ones that have to clear it.
+        if (!state.holding_for_peer && state.node) {
+            RCLCPP_INFO(state.node->get_logger(),
+                        "🤝 Peer has the target - holding position");
+        }
+        state.holding_for_peer = true;
+        return BT::NodeStatus::SUCCESS;
+    }
+};
+
+// ============================================================================
 // BehaviorTree Action: Intelligent scanning with corner escape
 // ============================================================================
 class IntelligentScanAction : public BT::SyncActionNode {
@@ -431,7 +510,8 @@ public:
         if (!state.turret) {
             return BT::NodeStatus::FAILURE;
         }
-        
+        state.holding_for_peer = false;
+
         // Scan every 0.8 seconds
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration<double>(now - last_scan_time_).count();
@@ -554,6 +634,35 @@ public:
         // from either machine.
         status_pub_ = this->create_publisher<two_towers::msg::TowerStatus>("status", 10);
 
+        // Who to stand down for. Empty means no coordination, which is the
+        // default on purpose: a single tower, or one whose peer is switched
+        // off, must behave exactly as it did before coordination existed.
+        this->declare_parameter("peer_tower_id", "");
+        const std::string peer = this->get_parameter("peer_tower_id").as_string();
+
+        if (peer.empty()) {
+            RCLCPP_INFO(this->get_logger(),
+                        "No peer_tower_id set - running independently");
+        } else {
+            // ABSOLUTE topic. This is the one place a tower deliberately
+            // reaches outside its own namespace, because the whole point is to
+            // hear a different tower. The name comes from a parameter rather
+            // than being compiled in, so the pairing is a config decision.
+            const std::string peer_topic = "/" + peer + "/status";
+            peer_status_sub_ = this->create_subscription<two_towers::msg::TowerStatus>(
+                peer_topic,
+                10,
+                [](two_towers::msg::TowerStatus::SharedPtr msg) {
+                    auto& s = TrackerState::get();
+                    s.peer_has_target = msg->has_target;
+                    s.peer_last_status = std::chrono::steady_clock::now();
+                    s.peer_ever_seen = true;
+                }
+            );
+            RCLCPP_INFO(this->get_logger(), "Standing down for peer: %s",
+                        peer_topic.c_str());
+        }
+
         // 5 Hz, deliberately decoupled from the 15 Hz control tick. Status is
         // for observers, not for the control loop, and republishing state at
         // the tick rate would put three times the traffic on a Wi-Fi link that
@@ -573,8 +682,20 @@ public:
         BT::BehaviorTreeFactory factory;
         factory.registerNodeType<HasPersonDetection>("HasPersonDetection");
         factory.registerNodeType<SmoothTrackAction>("SmoothTrack");
+        factory.registerNodeType<PeerHasTarget>("PeerHasTarget");
+        factory.registerNodeType<HoldForPeerAction>("HoldForPeer");
         factory.registerNodeType<IntelligentScanAction>("IntelligentScan");
         
+        // Priority order, highest first:
+        //
+        //   1. I can see someone      -> track them
+        //   2. My peer can see someone -> hold, do not sweep a covered room
+        //   3. Otherwise               -> scan
+        //
+        // The peer branch sits BELOW tracking deliberately. A tower that can
+        // see the target keeps tracking it regardless of what the other tower
+        // reports, so two towers watching the same person both stay on it and
+        // neither defers. Standing down only ever costs a scan, never a track.
         const std::string xml_tree = R"(
             <root BTCPP_format="4">
                 <BehaviorTree ID="TrackingTree">
@@ -582,6 +703,10 @@ public:
                         <Sequence>
                             <HasPersonDetection/>
                             <SmoothTrack/>
+                        </Sequence>
+                        <Sequence>
+                            <PeerHasTarget/>
+                            <HoldForPeer/>
                         </Sequence>
                         <IntelligentScan/>
                     </Fallback>
@@ -661,6 +786,7 @@ private:
     BT::Tree tree_;
     rclcpp::Subscription<two_towers::msg::DetectionArray>::SharedPtr subscription_;
     rclcpp::Publisher<two_towers::msg::TowerStatus>::SharedPtr status_pub_;
+    rclcpp::Subscription<two_towers::msg::TowerStatus>::SharedPtr peer_status_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr status_timer_;
 };
