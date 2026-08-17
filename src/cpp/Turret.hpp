@@ -33,7 +33,7 @@
  *   - pigpiod daemon must be running (sudo systemctl start pigpiod)
  *   - ServoController class for PWM abstraction
  *
- * @author Tate Lloyd <tate.lloyd@yale.edu>
+ * @author Tate Lloyd
  * @license MIT
  */
 

@@ -582,7 +582,6 @@ Robotics & Embedded Systems Engineer
 
 - GitHub: [@tatelloyd](https://github.com/tatelloyd)
 - LinkedIn: [/in/tatelloyd](https://www.linkedin.com/in/tatelloyd/)
-- Email: tate.lloyd@yale.edu
 
 ---
 

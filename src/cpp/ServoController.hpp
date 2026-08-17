@@ -25,7 +25,7 @@
  *   - Auto-centering on destruction prevents erratic final position
  *   - Copy operations deleted to prevent duplicate hardware access
  *
- * @author Tate Lloyd <tate.lloyd@yale.edu>
+ * @author Tate Lloyd
  * @license MIT
  */
 
