@@ -147,6 +147,7 @@ install(TARGETS
 # behind it, and the launch files refer to it by filename.
 install(PROGRAMS
   src/python/two_towers_detector_node.py
+  src/python/system_view_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
