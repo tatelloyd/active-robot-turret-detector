@@ -36,7 +36,7 @@ ROS2 Interface:
                                   disables video for that tower.
         - port        (int): HTTP port for this page
 
-Author: Tate Lloyd <tate.lloyd@yale.edu>
+Author: Tate Lloyd
 License: MIT
 """
 
