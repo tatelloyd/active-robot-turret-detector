@@ -30,7 +30,7 @@ ROS2 Interface:
     Note: there is no tower_id parameter. Tower identity comes from the
     namespace the node is launched into, so the same binary serves any tower.
 
-Author: Tate Lloyd <tate.lloyd@yale.edu>
+Author: Tate Lloyd
 License: MIT
 """
 

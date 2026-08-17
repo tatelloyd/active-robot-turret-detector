@@ -5,7 +5,7 @@
  * Implements the Turret class for coordinated pan/tilt servo control
  * via the pigpio daemon.
  *
- * @author Tate Lloyd <tate.lloyd@yale.edu>
+ * @author Tate Lloyd
  * @license MIT
  */
 

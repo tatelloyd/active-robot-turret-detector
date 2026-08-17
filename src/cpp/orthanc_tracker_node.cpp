@@ -39,7 +39,7 @@
  * Subscriptions:
  *    - /tower_a/detections (two_towers/msg/DetectionArray)
  *
- * @author Tate Lloyd <tate.lloyd@yale.edu>
+ * @author Tate Lloyd
  * @license MIT
  */
 

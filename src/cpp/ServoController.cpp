@@ -5,7 +5,7 @@
  * Implements the ServoController class for hardware PWM servo control
  * via the pigpio daemon.
  *
- * @author Tate Lloyd <tate.lloyd@yale.edu>
+ * @author Tate Lloyd
  * @license MIT
  */
 
