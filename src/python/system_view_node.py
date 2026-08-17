@@ -32,8 +32,18 @@ ROS2 Interface:
         - tower_ids   (string[]): namespaces to watch, e.g. [tower_a, tower_b]
         - tower_labels(string[]): display names, e.g. [Orthanc, Barad-dur].
                                   Positional; falls back to the id.
-        - stream_urls (string[]): optional MJPEG URL per tower. Empty string
-                                  disables video for that tower.
+        - stream_urls (string): comma-separated MJPEG URL per tower, positional
+                               against tower_ids. An empty entry disables video
+                               for that tower; "" disables all of them.
+
+                               A comma-separated STRING rather than a string
+                               array on purpose. Launch concatenates a list of
+                               substitutions into one string, so a list-typed
+                               parameter built from launch arguments arrives
+                               as a single joined value and fails to coerce --
+                               `Cannot convert value '' to a list of str`.
+                               Taking the join as the interface removes the
+                               ambiguity instead of fighting it.
         - port        (int): HTTP port for this page
 
 Author: Tate Lloyd
@@ -79,12 +89,13 @@ class SystemViewNode(Node):
 
         self.declare_parameter('tower_ids', ['tower_a', 'tower_b'])
         self.declare_parameter('tower_labels', ['Orthanc', 'Barad-dur'])
-        self.declare_parameter('stream_urls', ['', ''])
+        self.declare_parameter('stream_urls', '')
         self.declare_parameter('port', 8080)
 
         tower_ids = list(self.get_parameter('tower_ids').value)
         labels = list(self.get_parameter('tower_labels').value)
-        streams = list(self.get_parameter('stream_urls').value)
+        streams_raw = self.get_parameter('stream_urls').value or ''
+        streams = [u.strip() for u in streams_raw.split(',')]
         self.port = self.get_parameter('port').value
 
         _config['order'] = tower_ids
