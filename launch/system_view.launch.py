@@ -59,14 +59,18 @@ def generate_launch_description():
         name='system_view',
         parameters=[{
             'port': ParameterValue(LaunchConfiguration('port'), value_type=int),
-            # The ParameterValue wraps the WHOLE list, not each element.
-            # Wrapping elements individually raises "Expected 'subvalue' to be
-            # one of [...]" at load time, and a bare list of substitutions is
-            # ambiguous -- launch would concatenate them into one string rather
-            # than build a two-element array. list[str] states which is meant.
+            # Launch CONCATENATES a list of substitutions into a single
+            # string. Two earlier attempts fought that and lost: wrapping each
+            # element in ParameterValue raises "Expected 'subvalue' to be one
+            # of [...]" at load, and declaring value_type=list[str] fails at
+            # launch with `Cannot convert value '' to a list of str` because
+            # the pair had already been joined into one empty string.
+            #
+            # So join them deliberately, with a comma, and let the node split.
+            # The concatenation that broke both attempts is now the mechanism.
             'stream_urls': ParameterValue(
-                [LaunchConfiguration('stream_a'), LaunchConfiguration('stream_b')],
-                value_type=list[str],
+                [LaunchConfiguration('stream_a'), ',', LaunchConfiguration('stream_b')],
+                value_type=str,
             ),
         }],
         output='screen',

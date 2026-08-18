@@ -40,7 +40,8 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             ros-jazzy-behaviortree-cpp \
-            python3-colcon-common-extensions
+            python3-colcon-common-extensions \
+            python3-flask
 
       # The runner is x86 with no Raspberry Pi and no pigpio daemon, so we build
       # against the GPIO stubs. Everything above the GPIO boundary -- the
@@ -61,10 +62,13 @@ jobs:
           colcon test --event-handlers console_direct+
           colcon test-result --verbose
 
-      # Evaluate the launch descriptions without starting any nodes. This
-      # catches typos, bad substitutions and missing install rules -- the kind
-      # of mistake that otherwise only shows up on the robot, which is the
-      # worst possible place to discover it.
+      # --show-args prints the DECLARED arguments. It parses the file and
+      # builds the LaunchDescription, so it catches syntax errors, bad imports
+      # and missing install rules -- but it never evaluates the parameters, so
+      # a launch file can pass this and still fail the moment you run it.
+      # That happened: a parameter typed list[str] and fed from launch
+      # arguments passed here and died on the robot with
+      # `Cannot convert value '' to a list of str`. The step below closes it.
       - name: Validate launch files
         shell: bash
         run: |
@@ -73,6 +77,28 @@ jobs:
           ros2 launch two_towers tower.launch.py --show-args
           ros2 launch two_towers two_towers.launch.py --show-args
           ros2 launch two_towers system_view.launch.py --show-args
+
+      # Actually START each launch file and confirm launch itself does not
+      # reject it. This is what --show-args cannot do: parameter substitution
+      # only resolves when the description is executed. The nodes will fail
+      # for want of a camera and a pigpio daemon, which is fine and expected --
+      # what is NOT acceptable is launch refusing the file before any node
+      # gets to try.
+      - name: Evaluate launch descriptions
+        shell: bash
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          source install/setup.bash
+          for f in tower.launch.py two_towers.launch.py system_view.launch.py; do
+            echo "=== $f ==="
+            timeout 20s ros2 launch two_towers "$f" > "/tmp/$f.log" 2>&1 || true
+            if grep -q "Caught exception in launch" "/tmp/$f.log"; then
+              echo "LAUNCH REJECTED $f:"
+              grep -A3 "Caught exception in launch" "/tmp/$f.log"
+              exit 1
+            fi
+            echo "  launch accepted it"
+          done
 
   # ==========================================================================
   # Static checks on the Python detector.
