@@ -557,15 +557,10 @@ in it.
 - [x] Video streaming
 
 ### Phase 2: Multi-Tower (Planned)
-- [ ] Deploy second turret hardware
-- [ ] Tower status publishing
-- [ ] Coordinator node for handoff
-- [ ] Cooperative tracking mode
-
-### Phase 3: Advanced Features (Future)
-- [ ] Kalman filter motion prediction
-- [ ] AI-powered decision making
-- [ ] Multi-person tracking
+- [x] Deploy second turret hardware
+- [x] Tower status publishing
+- [x] Coordinator node for handoff
+- [x] Cooperative tracking mode
 
 ---
 
