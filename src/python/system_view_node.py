@@ -215,50 +215,76 @@ PAGE = """<!doctype html>
 <div class="grid" id="grid"></div>
 <div class="foot" id="foot"></div>
 <script>
-// Poll rather than stream. Status publishes at 5 Hz and this is a human-facing
-// view, so 2 Hz is plenty; it also means a dropped request self-heals on the
-// next tick instead of needing reconnect logic for a websocket.
-function badge(t) {
-  if (!t.online) return 'offline';
-  if (t.state === 'locked') return 'locked';
-  if (t.state === 'tracking') return 'tracking';
-  return 'scanning';
+// The cards are built ONCE and then only their text and classes are updated.
+//
+// The first version re-rendered grid.innerHTML on every poll, which was fine
+// for numbers and fatal for video: an MJPEG stream is a long-lived HTTP
+// connection, so replacing the <img> twice a second tore down both streams and
+// opened two more, forever. The picture froze on an early frame and the tab
+// eventually died under the pile of half-open connections. Anything holding a
+// connection -- video, websocket, audio -- has to outlive the render.
+let built = false;
+
+function cardHTML(t) {
+  const cam = t.stream ? '<img class="cam" src="' + t.stream + '" alt="">' : '';
+  return '<div class="card">' +
+    '<div class="top"><span class="name">' + t.label + '</span>' +
+    '<span class="badge" id="b-' + t.id + '"></span></div>' +
+    '<table>' +
+    '<tr><td class="k">pan / tilt</td><td class="v" id="pt-' + t.id + '">&mdash;</td></tr>' +
+    '<tr><td class="k">target x , y</td><td class="v" id="xy-' + t.id + '">&mdash;</td></tr>' +
+    '<tr><td class="k">confidence</td><td class="v" id="cf-' + t.id + '">&mdash;</td></tr>' +
+    '<tr><td class="k">time to frame edge</td><td class="v" id="te-' + t.id + '">&mdash;</td></tr>' +
+    '<tr><td class="k">frames since detection</td><td class="v" id="fd-' + t.id + '">&mdash;</td></tr>' +
+    '</table>' + cam + '</div>';
 }
-function label(t, anyPeerTracking) {
-  if (!t.online) return 'offline';
-  if (t.state === 'locked') return 'locked';
-  if (t.state === 'tracking') return 'tracking';
-  // A scanning tower while another tower has the target is exactly the
-  // coordination behaviour; call it out rather than making the viewer infer it.
-  return anyPeerTracking ? 'standing by' : 'scanning';
+
+function set(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
 }
+
+function stateOf(t, anyTracking) {
+  if (!t.online) return ['offline', 'offline'];
+  if (t.state === 'locked') return ['locked', 'locked'];
+  if (t.state === 'tracking') return ['tracking', 'tracking'];
+  // Scanning while another tower holds the target IS the coordination. Name it
+  // rather than making the viewer infer it from two cards at once.
+  if (anyTracking) return ['holding', 'standing by'];
+  return ['scanning', 'scanning'];
+}
+
 async function tick() {
   let d;
   try { d = await (await fetch('/api/status')).json(); }
-  catch (e) { document.getElementById('sub').textContent = 'lost connection to view'; return; }
+  catch (e) { set('sub', 'lost connection to view'); return; }
+
+  if (!built) {
+    document.getElementById('grid').innerHTML = d.towers.map(cardHTML).join('');
+    built = true;
+  }
 
   const anyTracking = d.towers.some(t => t.online && t.has_target);
-  document.getElementById('grid').innerHTML = d.towers.map(t => {
-    const cls = t.has_target ? badge(t) : (t.online && anyTracking ? 'holding' : badge(t));
-    const rows = t.online ? `
-      <tr><td class="k">pan / tilt</td><td class="v">${t.pan_angle}&deg; / ${t.tilt_angle}&deg;</td></tr>
-      <tr><td class="k">target x , y</td><td class="v">${t.has_target ? t.target_x+' , '+t.target_y : '&mdash;'}</td></tr>
-      <tr><td class="k">confidence</td><td class="v">${t.has_target ? t.confidence : '&mdash;'}</td></tr>
-      <tr><td class="k">time to frame edge</td><td class="v">${t.time_to_edge >= 0 ? t.time_to_edge+' s' : '&mdash;'}</td></tr>
-      <tr><td class="k">frames since detection</td><td class="v">${t.frames_since_detection}</td></tr>`
-      : `<tr><td class="k">no status received</td><td class="v">&mdash;</td></tr>`;
-    const cam = t.stream ? `<img class="cam" src="${t.stream}" alt="">` : '';
-    return `<div class="card">
-      <div class="top"><span class="name">${t.label}</span>
-      <span class="badge ${cls}">${label(t, anyTracking && !t.has_target)}</span></div>
-      <table>${rows}</table>${cam}</div>`;
-  }).join('');
+
+  d.towers.forEach(t => {
+    const [cls, text] = stateOf(t, anyTracking && !t.has_target);
+    const b = document.getElementById('b-' + t.id);
+    if (b) { b.className = 'badge ' + cls; b.textContent = text; }
+
+    if (!t.online) {
+      ['pt', 'xy', 'cf', 'te', 'fd'].forEach(k => set(k + '-' + t.id, '\u2014'));
+      return;
+    }
+    set('pt-' + t.id, t.pan_angle + '\u00b0 / ' + t.tilt_angle + '\u00b0');
+    set('xy-' + t.id, t.has_target ? (t.target_x + ' , ' + t.target_y) : '\u2014');
+    set('cf-' + t.id, t.has_target ? t.confidence : '\u2014');
+    set('te-' + t.id, t.time_to_edge >= 0 ? (t.time_to_edge + ' s') : '\u2014');
+    set('fd-' + t.id, t.frames_since_detection);
+  });
 
   const online = d.towers.filter(t => t.online).length;
-  document.getElementById('sub').textContent =
-    `${online} of ${d.towers.length} towers online`;
-  document.getElementById('foot').textContent =
-    `a tower silent for ${d.stale_after}s is shown offline`;
+  set('sub', online + ' of ' + d.towers.length + ' towers online');
+  set('foot', 'a tower silent for ' + d.stale_after + 's is shown offline');
 }
 tick(); setInterval(tick, 500);
 </script></body></html>
